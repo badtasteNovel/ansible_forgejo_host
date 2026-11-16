@@ -13,18 +13,13 @@ d-i mirror/http/hostname string deb.debian.org
 d-i mirror/http/directory string /debian
 d-i mirror/http/proxy string
 
-### Account setup — 不設 root 密碼、直接停用 root 登入
-### TEMPORARY DEBUG：charlie 平常應該要鎖密碼（d-i passwd/user-password-crypted
-### password !），只能用 SSH 金鑰登入——這是 CLAUDE.md 記錄的專案核心設計。這裡
-### 暫時改成明文密碼 pd1234，純粹是為了在 WireGuard handshake 不通、SSH 也連不上
-### 的情況下，能從 ESXi VM console 登入診斷問題；問題排查完之後要 revert 回鎖密碼
-### 的版本，不是永久改動。
+### Account setup — 不設 root 密碼、直接停用 root 登入；
+### 使用者帳號密碼鎖住（crypted 值填 "!"），只能用 SSH 金鑰登入
 d-i passwd/root-login boolean false
 d-i passwd/make-user boolean true
 d-i passwd/user-fullname string {{ vm_user }}
 d-i passwd/username string {{ vm_user }}
-d-i passwd/user-password password pd1234
-d-i passwd/user-password-again password pd1234
+d-i passwd/user-password-crypted password !
 d-i passwd/user-default-groups string sudo
 
 ### Clock and time zone setup
