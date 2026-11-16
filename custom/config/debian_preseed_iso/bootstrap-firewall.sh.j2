@@ -5,14 +5,27 @@ set -euo pipefail
 # 但實測發現 in-target ufw ... 在 d-i 安裝環境自己的 chroot 裡執行會悄悄
 # 失效——ufw 開機後顯示 active，但規則數是 0，等於完全沒有防火牆在擋
 # （fail-open），late_command 又是用 ; 串接、任何一步失敗都不會中止，所以
-# 裝機過程完全看不出這個問題。這支腳本把同一份規則搬到這裡，讓使用者在
-# VM 真正開機後、自己手動執行——這裡才是能安全直接呼叫 `ufw enable` 的
-# 地方（不是 d-i chroot，是真正跑起來的系統，套用規則不會有風險）。
+# 裝機過程完全看不出這個問題。這支腳本把同一份規則搬到這裡——late_command
+# 另外寫了一個 bootstrap-firewall.service（ConditionFirstBoot=yes）自動在
+# VM 第一次真開機時執行這支腳本一次，裝機完就是完整防護狀態，不需要使用者
+# 手動介入；這裡才是能安全直接呼叫 `ufw enable` 的地方（不是 d-i chroot，
+# 是真正跑起來的系統，套用規則不會有風險）。
 #
-# 跟 bootstrap-sudo 不一樣，這支不是一次性、不會自我刪除：ufw 規則本身
-# 可以重複套用（ufw allow 遇到已經存在的規則只會跳過，不會出錯），留著
-# 可以在未來需要時再重新確認/套用一次，不是什麼敏感的「開後門」工具，
-# 不需要用完就刪。
+# 跟 bootstrap-sudo 一樣是一次性、跑完會自我刪除——用 trap ... EXIT 掛在最
+# 前面，不管從哪個 exit 路徑離開都會觸發，比在腳本最後面多寫一行 rm 更可靠
+# （萬一中間哪步提早 exit，陽春的「最後一行 rm」永遠不會被執行到）。只在
+# 真正成功（exit code 0）時才刪：失敗（包含最前面的 root 檢查沒過）保留
+# 腳本，才有機會修完問題再重跑，不會因為一次失敗就把唯一一份腳本弄丟。
+# ConditionFirstBoot=yes 本來就已經讓它不會在重開機時被 systemd 再次觸發，
+# 這裡自刪是多一層保險，跟 bootstrap-sudo 一樣不留著一支「隨時可以重新
+# 套用系統設定」的腳本在機器上。
+cleanup() {
+  local exit_code=$?
+  if [ "$exit_code" -eq 0 ]; then
+    rm -f "$0"
+  fi
+}
+trap cleanup EXIT
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "錯誤：請用 sudo 執行這支程式（例如：sudo ~/bootstrap/bootstrap-firewall.sh）" >&2

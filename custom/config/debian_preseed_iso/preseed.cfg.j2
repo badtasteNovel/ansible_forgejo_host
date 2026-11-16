@@ -103,23 +103,31 @@ d-i finish-install/reboot_in_progress note
 ###
 ### /cdrom/bootstrap-sudo、/cdrom/bootstrap-firewall.sh（分別由
 ### control-panel/debian.yml 交叉編譯/渲染出來、remaster-iso 塞進 ISO 根目錄）
-### 一起複製進 charlie 家目錄下的 ~/bootstrap/ 資料夾——兩支都是「要不要用、
-### 什麼時候用」完全由使用者自己決定的手動救援/維護腳本，只複製檔案、不
-### 執行，放在同一個資料夾方便管理：
+### 一起複製進 charlie 家目錄下的 ~/bootstrap/ 資料夾，放在同一個資料夾方便
+### 管理，兩支都是「跑一次、成功就自己刪除自己」的一次性腳本，差別只在
+### 「誰觸發執行」：
 ###
-### - bootstrap-sudo：charlie 平常完全沒有密碼、只能用 SSH 金鑰登入，這是
-###   刻意的安全設計，這裡不去動它；但如果哪天 WireGuard 或 SSH 本身掛了，
-###   連 ESXi console 都進不去（console 登入需要密碼，charlie 跟 root 都
-###   沒有），到時候除了重建整台 VM 就沒有別的辦法了。這支腳本讓使用者趁
-###   還能 SSH 進去的時候，自己執行一次（sudo ~/bootstrap/bootstrap-sudo），
-###   互動設一個密碼、把 charlie 加進 sudo group，跑完自己刪除自己——預設
-###   安全姿態完全不變，純粹是多留一條「使用者自己選擇要不要開」的退路。
+### - bootstrap-sudo：「要不要用、什麼時候用」完全由使用者自己決定，這裡
+###   只複製檔案、不執行。charlie 平常完全沒有密碼、只能用 SSH 金鑰登入，
+###   這是刻意的安全設計，這裡不去動它；但如果哪天 WireGuard 或 SSH 本身
+###   掛了，連 ESXi console 都進不去（console 登入需要密碼，charlie 跟
+###   root 都沒有），到時候除了重建整台 VM 就沒有別的辦法了。這支腳本讓
+###   使用者趁還能 SSH 進去的時候，自己執行一次
+###   （sudo ~/bootstrap/bootstrap-sudo），互動設一個密碼、把 charlie 加進
+###   sudo group，跑完自己刪除自己——預設安全姿態完全不變，純粹是多留一條
+###   「使用者自己選擇要不要開」的退路。
 ###
-### - bootstrap-firewall.sh：下面 late_command 本身不會去呼叫 ufw（理由見
-###   這份檔案自己開頭的說明——在 d-i chroot 裡套用 ufw 規則實測不可靠，
-###   會悄悄 fail-open），改成讓使用者開機後自己手動執行一次
-###   （sudo ~/bootstrap/bootstrap-firewall.sh）。跟 bootstrap-sudo 不同，
-###   這支不是一次性、不會自我刪除，可以重複執行。
+### - bootstrap-firewall.sh：由 systemd 自動觸發，不是使用者手動決定。下面
+###   late_command 不會直接呼叫 ufw（理由見這份檔案自己開頭的說明——在
+###   d-i chroot 裡套用 ufw 規則實測不可靠，會悄悄 fail-open），改成額外
+###   寫一個 systemd oneshot service（bootstrap-firewall.service，
+###   ConditionFirstBoot=yes），只 enable、不在這裡真的執行，留到 VM 第
+###   一次真開機時自動套用一次（那裡才是能安全直接呼叫 `ufw enable` 的
+###   地方，不是 d-i chroot），裝機完就是完整的防護狀態，不需要使用者手動
+###   介入。腳本本身跟 bootstrap-sudo 一樣，成功執行完會自我刪除（見腳本
+###   自己開頭用 trap ... EXIT 的說明）——ConditionFirstBoot=yes 已經讓
+###   systemd 不會在重開機時再觸發它，自刪是多一層保險，兩者加起來才算
+###   真正的一次性。
 ###
 ### 下面這段（inotify / chrony / ufw）是直接烘焙進每一台 VM 的基礎設施調整，
 ### 不是這台 VM 專屬的身分資料，所以不像 SSH host key / wg0.conf 需要每台各自
@@ -144,7 +152,8 @@ d-i finish-install/reboot_in_progress note
 ###   等於完全沒有防火牆在擋），late_command 又是用 ; 串接、任何一步失敗都
 ###   不會中止，所以裝機過程完全看不出這個問題——已經在真實 ESXi 上踩過一次。
 ###   現在改成不在這裡碰 ufw，規則內容搬進 bootstrap-firewall.sh（見上面
-###   bootstrap-sudo 那段的說明），讓使用者開機後自己手動執行一次，那裡才是
+###   bootstrap-sudo 那段的說明），透過 bootstrap-firewall.service
+###   （ConditionFirstBoot=yes）在 VM 第一次真開機時自動套用一次，那裡才是
 ###   能安全直接呼叫 `ufw enable` 的地方（不是 d-i chroot，是真正跑起來的
 ###   系統）。
 d-i preseed/late_command string \
@@ -160,6 +169,16 @@ d-i preseed/late_command string \
   chmod 600 /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/.ssh; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/bootstrap; \
+  echo '[Unit]' > /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo 'ConditionFirstBoot=yes' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo 'After=network.target' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo '[Service]' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo 'ExecStart=/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo '[Install]' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  in-target systemctl enable bootstrap-firewall.service; \
   sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config; \
   sed -i '/^Port /d' /target/etc/ssh/sshd_config; \
   echo 'Port {{ ssh_port }}' >> /target/etc/ssh/sshd_config; \

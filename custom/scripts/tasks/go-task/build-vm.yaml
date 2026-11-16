@@ -98,6 +98,4 @@ tasks:
           --extra-vars "vm_name=${vm_name}"
 
         echo "" >&2
-        echo "VM 開機後，先 SSH（或 console）進去跑一次：sudo ~/bootstrap/bootstrap-firewall.sh" >&2
-        echo "（late_command 在裝機階段套用 ufw 規則不可靠，改成開機後手動跑這支腳本才會真的生效）" >&2
         echo "要把這台機器加進 WireGuard、成為 peer，VM 開機、查到 IP 之後，請跑：task add-peer" >&2
