@@ -38,17 +38,11 @@
 ```bash
 sh -c "$(curl -ssL https://taskfile.dev/install.sh)" -- -d -b /tmp && sudo mv /tmp/task /usr/local/bin/task && task --version
 ```
-### 2. **開啟WinRM服務**(windows)
+### 2. **預設powershell為預設命令**(windows)
 ```powershell
- Enable-PSRemoting
+New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force
 ```
-```powershell
-Get-NetFirewallPortFilter | Where-Object { $_.LocalPort -eq 5985 } | Get-NetFirewallRule | Set-NetFirewallRule -RemoteAddress 127.0.0.1
-```
-```powershell
-netstat -ano | Select-String "5985"
-```
-### 3. **安裝openssh-server**
+### 3. **安裝openssh-server**(windows)
 安裝 openSSH server
 ```powershell
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
