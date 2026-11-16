@@ -331,14 +331,19 @@
             path: "{{ windows_home_path }}\\.ssh"
             state: directory
 
+        - name: 算出這次要用的私鑰檔名（純隨機字串，不重複用同一個檔名，也不用 vm_name/vm_user 當識別符——這些資訊金鑰檔案自己的 comment 欄位就有了，檔名不需要重複塞一次）——實測在某台 Windows 機器上遇過「同一個檔名被反覆覆寫後，ssh.exe 讀出來的內容跟檔案實際內容對不上」的詭異現象（md5sum/ssh-keygen -y 確認檔案內容正確，但 ssh.exe 原生讀取卻拿到舊內容），換成每次都用全新檔名寫入從根本避開這個問題，不用繼續猜是不是防毒/EDR 軟體在對「一直被覆寫的私鑰檔案」做什麼特殊處理。舊檔案不自動清，單純留著（不影響使用，要清自己手動清）。用 ansible.builtin.password 搭配 /dev/null 產生隨機字串，不用額外裝 collection
+          ansible.builtin.set_fact:
+            windows_key_filename: "{{ lookup('ansible.builtin.password', '/dev/null', length=12, chars='ascii_lowercase,digits') }}"
+
         - name: 複製 charlie 的 client 私鑰（SSH 認證只需要私鑰，公鑰只有 VM 的 authorized_keys 跟本機 custom/generated/keys/ 需要留底，client 端不需要再放一份）
           ansible.windows.win_copy:
             src: "{{ keys_dir }}/ssh/{{ vm_user }}_ed25519"
-            dest: "{{ windows_home_path }}\\.ssh\\{{ vm_name }}_{{ vm_user }}_ed25519"
+            dest: "{{ windows_home_path }}\\.ssh\\{{ windows_key_filename }}"
 
-        - name: 把 VM 的 host key fingerprint 加進 Windows 原生環境真正的 known_hosts（不是複製一份獨立檔案，是直接 append 這一行；已經加過就不會重複加，也不會動到裡面其他主機原本的紀錄）
+        - name: 把 VM 的 host key fingerprint 加進/更新 Windows 原生環境真正的 known_hosts（不是複製一份獨立檔案，是直接處理這一行；用 regexp 比對同一個 [IP]:port 開頭的舊行、整行換掉，不是單純比對整行文字完全一樣——VM 重新 build 會換一把新的 host key，沒有 regexp 的話 win_lineinfile 只能判斷「這行文字存不存在」，舊行文字跟新行不一樣，只會一直往後 append、不會清掉舊行，同一個 host 會累積出好幾把不同的 fingerprint，之後 ssh 連線會被「REMOTE HOST IDENTIFICATION HAS CHANGED」卡住，也不會動到裡面其他主機原本的紀錄）
           community.windows.win_lineinfile:
             path: "{{ windows_home_path }}\\.ssh\\known_hosts"
+            regexp: '^\[{{ wireguard_vm_address | regex_escape }}\]:{{ vm_ssh_port }} '
             line: "[{{ wireguard_vm_address }}]:{{ vm_ssh_port }} {{ (hostvars['localhost'].vm_ssh_host_pubkey_raw.content | b64decode).strip() }}"
             create: true
 
@@ -347,5 +352,5 @@
             msg:
               - "原生 Windows 這邊認領到的 peer 是 {{ hostvars['localhost'].windows_peer_name }}。"
               - "WireGuard 設定檔：{{ windows_conf_path }}——打開 WireGuard for Windows，Import tunnel(s) from file 選這個檔案，按 Activate 就接通了。"
-              - "SSH 私鑰：{{ windows_home_path }}\\.ssh\\{{ vm_name }}_{{ vm_user }}_ed25519"
+              - "SSH 私鑰：{{ windows_home_path }}\\.ssh\\{{ windows_key_filename }}"
               - "VM 的 fingerprint 已經加進 {{ windows_home_path }}\\.ssh\\known_hosts（原本裡面其他主機的紀錄沒有被動到）"
