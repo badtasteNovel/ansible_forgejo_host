@@ -8,12 +8,18 @@
 # 跑這支 playbook 就等於兩邊一起處理，不需要另外跑一個指令：
 #   1. WSL2 自己：認領一個 peer 位置，直接寫 /etc/wireguard/wg0.conf、wg-quick up
 #      接通隧道。
-#   2. 偵測到是 WSL2（能查到 Windows 家目錄）的話，額外認領「另一個」peer 位置
-#      （不能跟 WSL2 那個共用同一把金鑰），產生一份 WireGuard for Windows 可以直接
-#      「Import tunnel(s) from file」的標準 .conf，放進 Windows 原生環境的
-#      <家目錄>/.wireguard/<vm_name>.conf——你自己手動在 WireGuard for Windows 裡
-#      匯入這個檔案、按下啟用，原生 Windows 這邊就接通了。這個檔名如果已經存在，
-#      task add-peer 會先問你要不要覆蓋（見 custom/scripts/tasks 裡 Taskfile 那段）。
+#   2. is_wsl2=true（Taskfile 偵測到 cmd.exe/wslpath 存在）的話，額外認領「另一個」
+#      peer 位置（不能跟 WSL2 那個共用同一把金鑰），產生一份 WireGuard for Windows
+#      可以直接「Import tunnel(s) from file」的標準 .conf，放進 Windows 原生環境的
+#      <家目錄>\.wireguard\<vm_name>.conf——你自己手動在 WireGuard for Windows 裡
+#      匯入這個檔案、按下啟用，原生 Windows 這邊就接通了。
+#
+# 原生 Windows 那一段走的是真正的 SSH 連線（hosts: windows，見 inventory/windows.ini），
+# 不是透過 WSL2 掛載的 /mnt/c/...（DrvFS）直接寫檔案——這是這次改版跟舊版最大的
+# 差異：Windows 家目錄改成連上去之後用 $env:USERPROFILE 現場查（Windows 原生路徑，
+# 用 \，不是 WSL2 掛載路徑的 /），檔案操作全部用 ansible.windows.*/community.windows.*
+# 模組，不用 unsafe_writes/重試去繞 DrvFS 的 atomic_move 問題——因為根本不會再碰到
+# 那個問題。
 #
 # 需要用 --extra-vars "vm_endpoint_ip=<VM的IP>" 指定 VM 的真實 IP（Endpoint 要用）
 # ——這支 playbook 刻意獨立於 build:debian 之外（見 task add-peer），因為 Endpoint
@@ -24,13 +30,12 @@
 # 底下找一個「還沒被任何機器認領」的 peer 位置來用（見
 # custom/scripts/tasks/ansible/wireguard_keys/claim_peer.yml），避免兩邊搶到同一組
 # 金鑰——這也是為什麼 WSL2 跟 Windows 兩邊各自認領一次，而不是共用同一次認領的
-# 結果。claimed 標記是等這邊的設定真的成功之後
-# 才寫上去的（見 custom/scripts/tasks/ansible/wireguard_keys/mark_peer_claimed.yml），不是挑到就
-# 馬上寫——挑跟標記刻意分開兩步，避免 wg-quick up 之類的步驟中途失敗，卻已經把
-# 這個 peer 永久標記成用掉了。peer 位置本身是 control-panel/debian.yml 用
-# peer_slot_count 批次產生的——如果這裡找不到任何還沒被認領的位置，代表要嘛數量
-# 用完了、要嘛根本還沒產生過，必須先重新 build 一次、要幾個新的位置（WSL2 +
-# Windows 兩個都要算，記得至少留 2 個名額）。
+# 結果。claimed 標記是等這邊的設定真的成功之後才寫上去的（見
+# custom/scripts/tasks/ansible/wireguard_keys/mark_peer_claimed.yml），不是挑到就
+# 馬上寫——挑跟標記刻意分開兩步，避免中途失敗卻已經把這個 peer 永久標記成用掉了。
+# peer 位置本身是 control-panel/debian.yml 用 peer_slot_count 批次產生的——如果這裡
+# 找不到任何還沒被認領的位置，代表要嘛數量用完了、要嘛根本還沒產生過，必須先重新
+# build 一次、多要幾個新的位置（WSL2 + Windows 兩個都要算，記得至少留 2 個名額）。
 #
 # 叫做 add-peer 而不是 agent，是刻意的：這台機器只是被加進 WireGuard 的點對點網路，
 # 不代表它會變成某個 cluster（例如 k3s）裡聽 VM 指揮的 agent 節點——目前這個專案
@@ -44,10 +49,10 @@
 #
 # 這是目前整個專案裡唯一一支會動到「執行 Ansible 這台機器自己」系統設定的 playbook
 # （寫 /etc/wireguard/wg0.conf、wg-quick up），所以需要 sudo；其他地方都只動 custom/
-# 底下的本地檔案，或是透過 SSH 動遠端的 ESXi/VM。wireguard-tools 本身不在這裡裝，是
-# task install（install:wireguard-tools）先裝好的，這裡假設它已經存在。
+# 底下的本地檔案，或是透過 SSH 動遠端的 ESXi/VM/Windows。wireguard-tools 本身不在
+# 這裡裝，是 task install（install:wireguard-tools）先裝好的，這裡假設它已經存在。
 
-- name: 把這台機器（WSL2 + 原生 Windows）加進某台 VM 的 WireGuard 點對點網路
+- name: 把這台機器（WSL2）加進某台 VM 的 WireGuard 點對點網路，準備好原生 Windows 要用的資料
   hosts: localhost
   connection: local
   gather_facts: false
@@ -67,8 +72,7 @@
     wireguard_listen_port: 51820
     ssh_host_key_path: "{{ keys_dir }}/known-hosts/{{ vm_name }}/ed_25519" # control-panel/debian.yml 產生的 VM host key，路徑要跟那邊一致
     known_hosts_path: "{{ keys_dir }}/known-hosts/known_hosts" # 這支 playbook 自己組、自己寫——SSH client 端的設定歸這裡管，不歸 control-panel 管
-    windows_home_path: "" # task add-peer 偵測到 WSL2 的話會帶進來；偵測不到就是空字串
-    windows_conf_path: "" # task add-peer 算好的 <Windows 家目錄>/.wireguard/<vm_name>.conf；空字串就跳過整個 Windows WireGuard 認領
+    is_wsl2: false # Taskfile.yaml 偵測到 cmd.exe/wslpath 存在時會帶 true 進來；是 false 就整個跳過原生 Windows 那段
 
   tasks:
     - name: 確認有指定 vm_endpoint_ip、vm_name
@@ -151,7 +155,30 @@
       ansible.builtin.command: wg-quick up wg0
       changed_when: true
 
-    - name: 隧道確定接通成功，才正式把 {{ wsl_peer_name }} 標記成已認領（見 claim_peer.yml 開頭說明：挑到跟標記分開兩步，避免中途失敗卻已經把這個 peer 用掉）
+    - name: 送一個封包主動觸發 handshake（wg-quick up 剛建好介面時不會主動送封包，要等 wg0.conf.j2 裡 PersistentKeepalive 的間隔時間到了才會送出第一次——這裡故意送一個 ping 讓它立刻動起來，ping 本身成不成功不重要，重點只是讓 wg0 有封包要送，才會觸發 WireGuard 協定層的 handshake）
+      become: true
+      ansible.builtin.command: "ping -c 1 -W 2 {{ wireguard_vm_address }}"
+      changed_when: false
+      failed_when: false
+
+    - name: 反覆查 wg show，直到跟 VM 真的發生過一次 handshake（不能只看 wg-quick up 有沒有報錯——沒報錯只代表本機介面建立成功，不代表 VM 那端真的有回應）
+      become: true
+      ansible.builtin.shell: wg show wg0 latest-handshakes | awk '{print $2}'
+      args:
+        executable: /bin/bash
+      register: wg_handshake_check
+      changed_when: false
+      failed_when: false
+      until: (wg_handshake_check.stdout | trim | int) > 0
+      retries: 10
+      delay: 3
+
+    - name: 擋下「重試完還是沒有 handshake」的情況——這種狀況下不應該把這個 peer 標記成已認領
+      ansible.builtin.assert:
+        that: (wg_handshake_check.stdout | trim | int) > 0
+        fail_msg: "重試 10 次（每次間隔 3 秒，共約 30 秒）後，wg0 仍然沒有跟 VM 的 WireGuard 發生過 handshake，隧道可能沒有真的接通。請確認：VM 已經開機、VM 上的 wg-quick@wg0 已經啟動、{{ vm_endpoint_ip }} 這個 IP 填對、本機防火牆沒有擋 UDP {{ wireguard_listen_port }}。這個 peer 位置（{{ wsl_peer_name }}）不會被標記成已認領，排查完可以直接重跑 task add-peer。"
+
+    - name: 隧道確定接通成功（真的發生過 handshake），才正式把 {{ wsl_peer_name }} 標記成已認領（見 claim_peer.yml 開頭說明：挑到跟標記分開兩步，避免中途失敗卻已經把這個 peer 用掉）
       ansible.builtin.include_tasks:
         file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/wireguard_keys/mark_peer_claimed.yml"
       vars:
@@ -178,18 +205,10 @@
         dest: "{{ known_hosts_path }}"
         mode: "0600"
 
-    # ---------- 原生 Windows 那一邊（偵測不到就整段跳過） ----------
-    #
-    # 這一整段寫進 /mnt/c/...（DrvFS）的任務都加了 register/until/retries/delay 重試：
-    # unsafe_writes 解決的是 atomic_move 的 rename 在 DrvFS 上不支援 POSIX 原子替換
-    # 語義的問題，但實際遇到的失敗是在那之後一步——Ansible 寫完檔案內容後，統一會呼叫
-    # set_fs_attributes_if_different 去 chmod 最終路徑，這一步偶爾抓不到剛寫好的檔案
-    # （FileNotFoundError），推測是 DrvFS/9P 的 metadata 可見度有短暫延遲，或是 Windows
-    # Defender 即時掃描對新建檔案短暫上鎖，兩者都不是 Linux 這端能直接修的時序問題，
-    # 用重試繞過（重跑同一個 copy/template/lineinfile 本身是 idempotent 的，重試無副作用）。
+    # ---------- 準備原生 Windows 要用的資料（實際寫進 Windows 由下面 hosts: windows 的 play 負責）----------
 
-    - name: 幫原生 Windows 另外認領一個 peer、產生 WireGuard for Windows 能直接匯入的 .conf，順便複製 SSH 金鑰、把 fingerprint 加進 known_hosts
-      when: windows_conf_path | length > 0
+    - name: 幫原生 Windows 認領一個 peer 位置、讀出金鑰材料、載入 .env（is_wsl2=false 就整段跳過）
+      when: is_wsl2 | bool
       block:
         - name: 認領一個 peer 位置給原生 Windows 用（不能跟 WSL2 那個共用同一把金鑰）
           ansible.builtin.include_tasks:
@@ -214,87 +233,111 @@
             src: "{{ wireguard_peers_dir }}/{{ windows_peer_name }}/psk"
           register: windows_peer_psk_raw
 
-        - name: 確保 Windows 那邊的 .wireguard/ 存在
-          ansible.builtin.file:
-            path: "{{ windows_conf_path | dirname }}"
-            state: directory
-            mode: "0700"
-
-        - name: 寫 WireGuard for Windows 可以直接 Import tunnel(s) from file 的 .conf（跟 wg-quick 用的是同一種格式）
-          ansible.builtin.template:
-            src: "{{ playbook_dir }}/../../custom/config/wireguard_agent/wg0.conf.j2"
-            dest: "{{ windows_conf_path }}"
-            mode: "0600"
-            unsafe_writes: true # windows_conf_path 在 WSL2 掛載的 /mnt/c/...（DrvFS）底下，不支援 atomic_move 靠的 POSIX 原子替換語義，要跳過它直接寫
-          vars:
-            wireguard_private_key: "{{ (windows_peer_private_key_raw.content | b64decode).strip() }}"
-            wireguard_agent_address: "{{ (windows_peer_address_raw.content | b64decode).strip() }}"
-            wireguard_peer_public_key: "{{ (wireguard_vm_public_key_raw.content | b64decode).strip() }}"
-            wireguard_preshared_key: "{{ (windows_peer_psk_raw.content | b64decode).strip() }}"
-            wireguard_endpoint_ip: "{{ vm_endpoint_ip }}"
-          register: windows_conf_write
-          until: windows_conf_write is succeeded
-          retries: 3
-          delay: 2
-
-        - name: .conf 確定寫出成功，才正式把 {{ windows_peer_name }} 標記成已認領（見 claim_peer.yml 開頭說明：挑到跟標記分開兩步，避免中途失敗卻已經把這個 peer 用掉）
+        - name: 載入 custom/.env（SSH 第一次把公鑰部署到 Windows 之前的密碼備援要用，見 inventory/group_vars/windows.yml 開頭說明）
           ansible.builtin.include_tasks:
-            file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/wireguard_keys/mark_peer_claimed.yml"
+            file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/load_env.yml"
           vars:
-            peer_to_claim: "{{ windows_peer_name }}"
-
-        - name: 確保 Windows 那邊的 .ssh/ 存在
-          ansible.builtin.file:
-            path: "{{ windows_home_path }}/.ssh"
-            state: directory
-            mode: "0700"
-
-        - name: 複製 charlie 的 client 私鑰
-          ansible.builtin.copy:
-            src: "{{ keys_dir }}/ssh/{{ vm_user }}_ed25519"
-            dest: "{{ windows_home_path }}/.ssh/{{ vm_name }}_{{ vm_user }}_ed25519"
-            mode: "0600"
-            remote_src: true
-            unsafe_writes: true # 同上，目的地在 WSL2 掛載的 /mnt/c/...（DrvFS），atomic_move 在這種掛載點上會直接失敗
-          register: client_private_key_write
-          until: client_private_key_write is succeeded
-          retries: 3
-          delay: 2
-
-        - name: 複製 charlie 的 client 公鑰
-          ansible.builtin.copy:
-            src: "{{ keys_dir }}/ssh/{{ vm_user }}_ed25519.pub"
-            dest: "{{ windows_home_path }}/.ssh/{{ vm_name }}_{{ vm_user }}_ed25519.pub"
-            mode: "0644"
-            remote_src: true
-            unsafe_writes: true
-          register: client_public_key_write
-          until: client_public_key_write is succeeded
-          retries: 3
-          delay: 2
-
-        - name: 把 VM 的 host key fingerprint 加進 Windows 原生環境真正的 known_hosts（不是複製一份獨立檔案，是直接 append 這一行；已經加過就不會重複加，也不會動到裡面其他主機原本的紀錄）
-          ansible.builtin.lineinfile:
-            path: "{{ windows_home_path }}/.ssh/known_hosts"
-            line: "[{{ wireguard_vm_address }}]:{{ vm_ssh_port }} {{ (vm_ssh_host_pubkey_raw.content | b64decode).strip() }}"
-            create: true
-            mode: "0600"
-            unsafe_writes: true
-          register: known_hosts_write
-          until: known_hosts_write is succeeded
-          retries: 3
-          delay: 2
-
-        - name: 印出 Windows 那邊還要做的事
-          ansible.builtin.debug:
-            msg:
-              - "原生 Windows 這邊認領到的 peer 是 {{ windows_peer_name }}。"
-              - "WireGuard 設定檔：{{ windows_conf_path }}——打開 WireGuard for Windows，Import tunnel(s) from file 選這個檔案，按 Activate 就接通了。"
-              - "SSH 私鑰：{{ windows_home_path }}/.ssh/{{ vm_name }}_{{ vm_user }}_ed25519"
-              - "VM 的 fingerprint 已經加進 {{ windows_home_path }}/.ssh/known_hosts（原本裡面其他主機的紀錄沒有被動到）"
+            dotenv_path: "{{ playbook_dir }}/../../custom/.env"
 
     - name: 印出結果
       ansible.builtin.debug:
         msg:
           - "WSL2 自己認領到的 peer 是 {{ wsl_peer_name }}，WireGuard 隧道已經接通。"
           - "之後 SSH 到 VM 要改連 {{ wireguard_vm_address }}，不是它的 LAN IP——VM 的 sshd 已經只監聽 WireGuard 這個位址。"
+
+- name: 把原生 Windows 加進 VM 的 WireGuard 點對點網路（走 SSH，不用 /mnt/c/... 掛載路徑）
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    vm_user: "{{ hostvars['localhost'].vm_user }}"
+    vm_ssh_port: "{{ hostvars['localhost'].vm_ssh_port }}"
+    wireguard_vm_address: "{{ hostvars['localhost'].wireguard_vm_address }}"
+    keys_dir: "{{ hostvars['localhost'].keys_dir }}"
+
+  tasks:
+    # is_wsl2=false 時，這個 block 的 when 直接評估成 false，不會嘗試連線
+    # 到 windows group（Ansible 只有真的要執行 task 時才會建立連線，純
+    # when 判斷用的是已經有的變數，不需要連線就能算出來）。
+    - name: 部署 WireGuard .conf + SSH 金鑰 + known_hosts 到原生 Windows
+      when: hostvars['localhost'].is_wsl2 | bool
+      block:
+        - name: 查詢 Windows 原生的使用者家目錄（取代舊版 WSL2 端用 cmd.exe + wslpath 算 DrvFS 路徑的做法）
+          ansible.windows.win_shell: echo $env:USERPROFILE
+          register: windows_profile_result
+          changed_when: false
+
+        - name: 算出 Windows 原生路徑（用 \，不是 WSL2 掛載路徑的 /）
+          ansible.builtin.set_fact:
+            windows_home_path: "{{ windows_profile_result.stdout | trim }}"
+
+        - name: 算出 .conf 的完整路徑
+          ansible.builtin.set_fact:
+            windows_conf_path: "{{ windows_home_path }}\\.wireguard\\{{ vm_name }}.conf"
+
+        - name: 檢查 .conf 是否已經存在
+          ansible.windows.win_stat:
+            path: "{{ windows_conf_path }}"
+          register: windows_conf_stat
+
+        - name: 已經存在就問要不要覆蓋（ansible.builtin.pause 是在 playbook 執行中途互動問問題的方式，跟 Taskfile 那邊的 gum confirm 不是同一套工具，但效果一樣——直接 Enter 預設是「不要」）
+          when: windows_conf_stat.stat.exists
+          ansible.builtin.pause:
+            prompt: "{{ windows_conf_path }} 已經存在，要覆蓋嗎？(yes/no，直接 Enter 預設 no)"
+          register: overwrite_prompt
+
+        - name: 算出最終要不要寫這個 .conf（原本不存在就直接寫；存在的話看剛剛回答）
+          ansible.builtin.set_fact:
+            should_write_conf: "{{ (not windows_conf_stat.stat.exists) or (overwrite_prompt.user_input | default('no') | trim | lower in ['y', 'yes']) }}"
+
+        - name: 確保 Windows 那邊的 .wireguard\ 存在
+          when: should_write_conf
+          ansible.windows.win_file:
+            path: "{{ windows_home_path }}\\.wireguard"
+            state: directory
+
+        - name: 寫 WireGuard for Windows 可以直接 Import tunnel(s) from file 的 .conf（跟 wg-quick 用的是同一種格式）
+          when: should_write_conf
+          ansible.windows.win_template:
+            src: "{{ playbook_dir }}/../../custom/config/wireguard_agent/wg0.conf.j2"
+            dest: "{{ windows_conf_path }}"
+          vars:
+            wireguard_private_key: "{{ (hostvars['localhost'].windows_peer_private_key_raw.content | b64decode).strip() }}"
+            wireguard_agent_address: "{{ (hostvars['localhost'].windows_peer_address_raw.content | b64decode).strip() }}"
+            wireguard_peer_public_key: "{{ (hostvars['localhost'].wireguard_vm_public_key_raw.content | b64decode).strip() }}"
+            wireguard_preshared_key: "{{ (hostvars['localhost'].windows_peer_psk_raw.content | b64decode).strip() }}"
+            wireguard_endpoint_ip: "{{ vm_endpoint_ip }}"
+
+        - name: .conf 確定寫出成功，才正式把 {{ hostvars['localhost'].windows_peer_name }} 標記成已認領（見 claim_peer.yml 開頭說明：挑到跟標記分開兩步，避免中途失敗卻已經把這個 peer 用掉）
+          when: should_write_conf
+          delegate_to: localhost
+          block:
+            - name: 寫 claimed 標記（delegate_to 讓這個 include 實際在 localhost 上執行，因為標記檔案在本機的 custom/generated/keys/ 底下，不是在 Windows 那邊）
+              ansible.builtin.include_tasks:
+                file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/wireguard_keys/mark_peer_claimed.yml"
+              vars:
+                peer_to_claim: "{{ hostvars['localhost'].windows_peer_name }}"
+
+        - name: 確保 Windows 那邊的 .ssh\ 存在
+          ansible.windows.win_file:
+            path: "{{ windows_home_path }}\\.ssh"
+            state: directory
+
+        - name: 複製 charlie 的 client 私鑰（SSH 認證只需要私鑰，公鑰只有 VM 的 authorized_keys 跟本機 custom/generated/keys/ 需要留底，client 端不需要再放一份）
+          ansible.windows.win_copy:
+            src: "{{ keys_dir }}/ssh/{{ vm_user }}_ed25519"
+            dest: "{{ windows_home_path }}\\.ssh\\{{ vm_name }}_{{ vm_user }}_ed25519"
+
+        - name: 把 VM 的 host key fingerprint 加進 Windows 原生環境真正的 known_hosts（不是複製一份獨立檔案，是直接 append 這一行；已經加過就不會重複加，也不會動到裡面其他主機原本的紀錄）
+          community.windows.win_lineinfile:
+            path: "{{ windows_home_path }}\\.ssh\\known_hosts"
+            line: "[{{ wireguard_vm_address }}]:{{ vm_ssh_port }} {{ (hostvars['localhost'].vm_ssh_host_pubkey_raw.content | b64decode).strip() }}"
+            create: true
+
+        - name: 印出 Windows 那邊還要做的事
+          ansible.builtin.debug:
+            msg:
+              - "原生 Windows 這邊認領到的 peer 是 {{ hostvars['localhost'].windows_peer_name }}。"
+              - "WireGuard 設定檔：{{ windows_conf_path }}——打開 WireGuard for Windows，Import tunnel(s) from file 選這個檔案，按 Activate 就接通了。"
+              - "SSH 私鑰：{{ windows_home_path }}\\.ssh\\{{ vm_name }}_{{ vm_user }}_ed25519"
+              - "VM 的 fingerprint 已經加進 {{ windows_home_path }}\\.ssh\\known_hosts（原本裡面其他主機的紀錄沒有被動到）"

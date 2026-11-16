@@ -40,25 +40,19 @@ tasks:
     cmds:
       - |
         set -euo pipefail
-        # 如果這是 WSL2（裝得到 cmd.exe、wslpath），順便查一下 Windows 原生那邊的
-        # 使用者家目錄在哪裡——WSL 的使用者名稱不等於 Windows 的使用者名稱，沒辦法
-        # 用猜的，直接問 Windows 本人（cmd.exe /c echo %USERPROFILE%）最準。查不到
-        # 就留空，playbook 那邊看到空的會直接跳過 Windows 這整段，不會失敗。
-        windows_home_path=""
+        # 只偵測「是不是 WSL2」這個布林值（裝得到 cmd.exe、wslpath），不在
+        # 這裡算 Windows 家目錄路徑——改成在 playbook 裡連上 Windows 之後，
+        # 用 $env:USERPROFILE 現場查原生 Windows 路徑，不走 /mnt/c/...
+        # （DrvFS）這條路，也不用 wslpath 轉換。
+        is_wsl2=false
         if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
-          windows_profile=$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r')
-          if [ -n "$windows_profile" ]; then
-            windows_home_path=$(wslpath -u "$windows_profile" 2>/dev/null || true)
-          fi
+          is_wsl2=true
         fi
 
-        # 偵測到 WSL2、要跑 Windows 那段之前，整支 task 最先做的事就是先確認
-        # task windows:test 能連得上（SSH 到本機 Windows）——這個 task 本身
-        # 不碰 Windows（公鑰複製是走 /mnt/c/...，不透過 SSH），但如果連線
-        # 本身都是壞的，代表這台機器的網路/金鑰設定出了問題，放最前面先擋
-        # 下來、提早發現，不要等問完一輪互動輸入（VM IP、選 VM）才在最後
-        # 失敗，浪費你的時間。
-        if [ -n "$windows_home_path" ]; then
+        # 偵測到 WSL2，整支 task 最先做的事就是先確認 task windows:test 能
+        # 連得上（SSH 到本機 Windows）——連不上就直接擋下來、不進入後面的
+        # 互動輸入（VM IP、選 VM），不要問完一輪才在最後失敗，浪費你的時間。
+        if [ "$is_wsl2" = "true" ]; then
           if ! task windows:test; then
             echo "錯誤：task windows:test 連不上本機 Windows，請先排查 SSH 連線問題（見 playbook/wsl/network.yml），再跑 task add-peer" >&2
             exit 1
@@ -90,16 +84,11 @@ tasks:
           echo "錯誤：沒有選擇 VM" >&2
           exit 1
         fi
-        windows_conf_path=""
-        if [ -n "$windows_home_path" ]; then
-          windows_conf_path="${windows_home_path}/.wireguard/${vm_name}.conf"
-          if [ -f "$windows_conf_path" ]; then
-            if ! gum confirm "$windows_conf_path 已經存在，要覆蓋嗎？"; then
-              windows_conf_path="" # 選不要就整段跳過，不影響 WSL2 自己那邊照常接通
-            fi
-          fi
-        fi
 
+        # .conf 已存在要不要覆蓋的確認，搬進 playbook 裡用 ansible.builtin.pause
+        # 處理了——存不存在現在要透過 SSH 連上 Windows 才查得到，Taskfile 這邊
+        # 沒有管道可以在跑 ansible-playbook 之前先問。
+        #
         # 分開傳好幾個 --extra-vars，不要塞進同一個用空白分隔的字串——Windows
         # 使用者名稱可能帶空白（例如 "John Doe"），空白分隔的 key=value 寫法
         # 在這種情況下會直接解析錯誤，每個各自用自己的引號包起來就沒事。
@@ -112,6 +101,5 @@ tasks:
         ansible-playbook playbook/wsl/add-peer.yml \
           --ask-become-pass \
           --extra-vars "vm_endpoint_ip=${vm_ip}" \
-          --extra-vars "windows_home_path=${windows_home_path}" \
-          --extra-vars "windows_conf_path=${windows_conf_path}" \
-          --extra-vars "vm_name=${vm_name}"
+          --extra-vars "vm_name=${vm_name}" \
+          --extra-vars "is_wsl2=${is_wsl2}"
