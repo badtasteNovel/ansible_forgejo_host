@@ -120,14 +120,19 @@ d-i finish-install/reboot_in_progress note
 ### - bootstrap-firewall.sh：由 systemd 自動觸發，不是使用者手動決定。下面
 ###   late_command 不會直接呼叫 ufw（理由見這份檔案自己開頭的說明——在
 ###   d-i chroot 裡套用 ufw 規則實測不可靠，會悄悄 fail-open），改成額外
-###   寫一個 systemd oneshot service（bootstrap-firewall.service，
-###   ConditionFirstBoot=yes），只 enable、不在這裡真的執行，留到 VM 第
-###   一次真開機時自動套用一次（那裡才是能安全直接呼叫 `ufw enable` 的
-###   地方，不是 d-i chroot），裝機完就是完整的防護狀態，不需要使用者手動
-###   介入。腳本本身跟 bootstrap-sudo 一樣，成功執行完會自我刪除（見腳本
-###   自己開頭用 trap ... EXIT 的說明）——ConditionFirstBoot=yes 已經讓
-###   systemd 不會在重開機時再觸發它，自刪是多一層保險，兩者加起來才算
-###   真正的一次性。
+###   寫一個 systemd oneshot service（bootstrap-firewall.service），只
+###   enable、不在這裡真的執行，留到 VM 真開機時自動套用（那裡才是能安全
+###   直接呼叫 `ufw enable` 的地方，不是 d-i chroot），裝機完就是完整的
+###   防護狀態，不需要使用者手動介入。判斷「要不要跑」用的是
+###   ConditionPathExists=<腳本路徑>，不是 ConditionFirstBoot——後者判斷
+###   的是「/etc/machine-id 開機當下是不是空的」，是給 cloud image 那種
+###   映像檔本身沒有 machine-id、開機時才由 systemd 生成的場景用的，d-i
+###   安裝在裝機階段就已經設好 machine-id 了，用 ConditionFirstBoot 永遠
+###   判斷成「不是第一次開機」，service 永遠不會觸發（實測在真實 ESXi 上
+###   踩過）。改用腳本檔案還在不在當條件：腳本成功執行完會自我刪除（見
+###   腳本自己開頭用 trap ... EXIT 的說明），第一次開機檔案還在、條件成立、
+###   執行、成功、自刪；之後每次開機檔案已經不在，條件不成立，systemd
+###   乾淨地跳過（skipped，不是 failed），不會留下永遠失敗的 unit。
 ###
 ### 下面這段（inotify / chrony / ufw）是直接烘焙進每一台 VM 的基礎設施調整，
 ### 不是這台 VM 專屬的身分資料，所以不像 SSH host key / wg0.conf 需要每台各自
@@ -152,10 +157,9 @@ d-i finish-install/reboot_in_progress note
 ###   等於完全沒有防火牆在擋），late_command 又是用 ; 串接、任何一步失敗都
 ###   不會中止，所以裝機過程完全看不出這個問題——已經在真實 ESXi 上踩過一次。
 ###   現在改成不在這裡碰 ufw，規則內容搬進 bootstrap-firewall.sh（見上面
-###   bootstrap-sudo 那段的說明），透過 bootstrap-firewall.service
-###   （ConditionFirstBoot=yes）在 VM 第一次真開機時自動套用一次，那裡才是
-###   能安全直接呼叫 `ufw enable` 的地方（不是 d-i chroot，是真正跑起來的
-###   系統）。
+###   bootstrap-sudo 那段的說明），透過 bootstrap-firewall.service 在 VM
+###   第一次真開機時自動套用一次，那裡才是能安全直接呼叫 `ufw enable` 的
+###   地方（不是 d-i chroot，是真正跑起來的系統）。
 d-i preseed/late_command string \
   mkdir -p /target/home/{{ vm_user }}/.ssh; \
   echo 'from="{{ wireguard_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
@@ -170,7 +174,7 @@ d-i preseed/late_command string \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/.ssh; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/bootstrap; \
   echo '[Unit]' > /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo 'ConditionFirstBoot=yes' >> /target/etc/systemd/system/bootstrap-firewall.service; \
+  echo 'ConditionPathExists=/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh' >> /target/etc/systemd/system/bootstrap-firewall.service; \
   echo 'After=network.target' >> /target/etc/systemd/system/bootstrap-firewall.service; \
   echo '[Service]' >> /target/etc/systemd/system/bootstrap-firewall.service; \
   echo 'Type=oneshot' >> /target/etc/systemd/system/bootstrap-firewall.service; \
