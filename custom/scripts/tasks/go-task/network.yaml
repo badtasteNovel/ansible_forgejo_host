@@ -3,7 +3,7 @@ version: '3'
 
 tasks:
   wsl:
-    desc: "設定這台 WSL2 控制端的網路（修 ip rule 讓 WinRM 連得到本機 Windows、k3s agent 用的防火牆/掛載）+ Windows 端的防火牆規則，見 playbook/wsl/network.yml"
+    desc: "設定這台 WSL2 控制端的網路（修 ip rule 讓 SSH 連得到本機 Windows、k3s agent 用的防火牆/掛載）+ Windows 端的防火牆規則，見 playbook/wsl/network.yml"
     silent: true
     cmds:
       - |

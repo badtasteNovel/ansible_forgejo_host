@@ -1,13 +1,13 @@
 ---
-# 測試 WinRM 能不能連上 inventory/windows.ini 設定的 Windows 主機。拆成兩個
-# play 是必要的，不是風格選擇：ansible_user/ansible_password 是「連線本身」
-# 要用的變數，第二個 play 一開始、還沒執行任何 task 之前就要先決定好，不可能
-# 靠第二個 play 自己的 task 去跑 custom/scripts/tasks/ansible/load_env（那時候
-# 已經要連線了，連線用的帳密卻還沒讀出來，雞生蛋蛋生雞）。所以先用第一個 play
-# （在 localhost 上）把 custom/.env 讀進 dotenv_vars 這個 fact，第二個 play 再
+# 測試 SSH 能不能連上 inventory/windows.ini 設定的 Windows 主機。拆成兩個
+# play 是必要的，不是風格選擇：ansible_password 是「連線本身」要用的變數
+# （當金鑰還沒被部署、或部署失敗時的備援——見下面說明），第二個 play 一
+# 開始、還沒執行任何 task 之前就要先決定好，不可能靠第二個 play 自己的
+# task 去跑 custom/scripts/tasks/ansible/load_env（那時候已經要連線了，
+# 連線用的密碼卻還沒讀出來，雞生蛋蛋生雞）。所以先用第一個 play（在
+# localhost 上）把 custom/.env 讀進 dotenv_vars 這個 fact，第二個 play 再
 # 透過 inventory/group_vars/windows.yml（套用到所有 hosts: windows 的 play，
-# 不用每個 play 自己重複寫 ansible_user/ansible_password）把值接過去當連線
-# 變數用。
+# 不用每個 play 自己重複寫這些連線變數）把值接過去用。
 #
 # 這整套刻意不靠 OS 環境變數（不用 lookup('env', ...)，Taskfile 那邊也不用
 # `set -a; source custom/.env`）——見 custom/scripts/tasks/ansible/load_env.yml
@@ -15,12 +15,18 @@
 #
 # 以後其他要對 windows group 下指令的 playbook，都要照這個結構：第一個 play
 # 先在 localhost 上載入 custom/scripts/tasks/ansible/load_env，第二個 play 才
-# 真正 hosts: windows
-# ——inventory/group_vars/windows.yml 的 ansible_user/ansible_password 是靠
-# 第一個 play 產生的 hostvars['localhost'].dotenv_vars 撐起來的，少了第一個
-# play，第二個 play 一開始連線就會因為 dotenv_vars 不存在直接範本解析失敗。
+# 真正 hosts: windows ——inventory/group_vars/windows.yml 的 ansible_password
+# 是靠第一個 play 產生的 hostvars['localhost'].dotenv_vars 撐起來的，少了第
+# 一個 play，第二個 play 一開始連線就會因為 dotenv_vars 不存在直接範本解析
+# 失敗。
+#
+# 這支 playbook 只負責「測連線」，假設 playbook/wsl/network.yml 已經先跑過
+# 一次（那支才是真正產生 SSH 金鑰、把公鑰部署到 Windows 的
+# administrators_authorized_keys 的地方）——如果金鑰還沒部署過，這裡一樣
+# 能連得上（金鑰認證失敗會自動退回密碼認證，見 group_vars/windows.yml 開頭
+# 說明），只是代表 network.yml 還沒跑過，不是這支 playbook 本身的問題。
 
-- name: 讀取 custom/.env，準備好 WinRM 連線要用的帳密
+- name: 讀取 custom/.env，準備好 SSH 連線的密碼備援
   hosts: localhost
   connection: local
   gather_facts: false
@@ -31,18 +37,9 @@
       vars:
         dotenv_path: "{{ playbook_dir }}/../../custom/.env"
 
-- name: 測試 WinRM 連線（win_ping）
+- name: 測試 SSH 連線（win_ping）
   hosts: windows
   gather_facts: false
   tasks:
-    # 前提：Windows 要先手動把 127.0.0.1 加進 NTLM loopback check 白名單
-    # （HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0\
-    # BackConnectionHostNames），否則這個 play 連第一個 task 都連不上去。
-    # 這一步沒辦法自動化：修這個設定本身要透過 WinRM 連線才能用 Ansible
-    # 做，但 WinRM 連線卡住的正是這個設定沒加——雞生蛋蛋生雞，Ansible 自己
-    # 打不破這個循環，手動跑一次是唯一辦法（PowerShell 系統管理員權限）：
-    #   New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0" `
-    #     -Name "BackConnectionHostNames" -Value "127.0.0.1" -PropertyType MultiString -Force
-    #   Restart-Service WinRM
     - name: win_ping
       ansible.windows.win_ping:
