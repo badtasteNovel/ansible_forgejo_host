@@ -99,6 +99,7 @@ tasks:
         # 沒有這個旗標 Ansible 會直接丟 "sudo: a password is required" 失敗；
         # 這裡就是在本機跑、本來就能互動，問一次密碼很合理，不需要額外存起來。
         ansible-playbook playbook/wsl/add-peer.yml \
+          -i inventory/windows.ini \
           --ask-become-pass \
           --extra-vars "vm_endpoint_ip=${vm_ip}" \
           --extra-vars "vm_name=${vm_name}" \
