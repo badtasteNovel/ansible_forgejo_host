@@ -40,17 +40,6 @@ tasks:
     cmds:
       - |
         set -euo pipefail
-        # 故意跟 build:debian 分開成獨立的 task：VM 的 IP 是 DHCP 配的，
-        # build:debian 跑的當下 VM 根本還沒開機，不可能知道 IP；只有在
-        # VM 已經建好、Register、Power On、你自己查到它的 IP 之後，才有
-        # 辦法回答這個問題，所以這裡現場問、現場把完整設定生出來並接通
-        # 隧道，不像之前那樣先寫一個殘缺的設定、要你事後自己編輯檔案。
-        vm_ip=$(gum input --header '請輸入virtual machine ip')
-        if [ -z "$vm_ip" ]; then
-          echo "錯誤：VM 的 IP 不能是空的" >&2
-          exit 1
-        fi
-
         # 如果這是 WSL2（裝得到 cmd.exe、wslpath），順便查一下 Windows 原生那邊的
         # 使用者家目錄在哪裡——WSL 的使用者名稱不等於 Windows 的使用者名稱，沒辦法
         # 用猜的，直接問 Windows 本人（cmd.exe /c echo %USERPROFILE%）最準。查不到
@@ -61,6 +50,30 @@ tasks:
           if [ -n "$windows_profile" ]; then
             windows_home_path=$(wslpath -u "$windows_profile" 2>/dev/null || true)
           fi
+        fi
+
+        # 偵測到 WSL2、要跑 Windows 那段之前，整支 task 最先做的事就是先確認
+        # task windows:test 能連得上（SSH 到本機 Windows）——這個 task 本身
+        # 不碰 Windows（公鑰複製是走 /mnt/c/...，不透過 SSH），但如果連線
+        # 本身都是壞的，代表這台機器的網路/金鑰設定出了問題，放最前面先擋
+        # 下來、提早發現，不要等問完一輪互動輸入（VM IP、選 VM）才在最後
+        # 失敗，浪費你的時間。
+        if [ -n "$windows_home_path" ]; then
+          if ! task windows:test; then
+            echo "錯誤：task windows:test 連不上本機 Windows，請先排查 SSH 連線問題（見 playbook/wsl/network.yml），再跑 task add-peer" >&2
+            exit 1
+          fi
+        fi
+
+        # 故意跟 build:debian 分開成獨立的 task：VM 的 IP 是 DHCP 配的，
+        # build:debian 跑的當下 VM 根本還沒開機，不可能知道 IP；只有在
+        # VM 已經建好、Register、Power On、你自己查到它的 IP 之後，才有
+        # 辦法回答這個問題，所以這裡現場問、現場把完整設定生出來並接通
+        # 隧道，不像之前那樣先寫一個殘缺的設定、要你事後自己編輯檔案。
+        vm_ip=$(gum input --header '請輸入virtual machine ip')
+        if [ -z "$vm_ip" ]; then
+          echo "錯誤：VM 的 IP 不能是空的" >&2
+          exit 1
         fi
 
         # vm_name 不是存在哪個設定檔裡的靜態值（build:debian 是用表單現場
