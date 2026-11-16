@@ -40,23 +40,18 @@ tasks:
     cmds:
       - |
         set -euo pipefail
-        # 只偵測「是不是 WSL2」這個布林值（裝得到 cmd.exe、wslpath），不在
-        # 這裡算 Windows 家目錄路徑——改成在 playbook 裡連上 Windows 之後，
-        # 用 $env:USERPROFILE 現場查原生 Windows 路徑，不走 /mnt/c/...
-        # （DrvFS）這條路，也不用 wslpath 轉換。
-        is_wsl2=false
-        if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
-          is_wsl2=true
-        fi
-
-        # 偵測到 WSL2，整支 task 最先做的事就是先確認 task windows:test 能
-        # 連得上（SSH 到本機 Windows）——連不上就直接擋下來、不進入後面的
-        # 互動輸入（VM IP、選 VM），不要問完一輪才在最後失敗，浪費你的時間。
-        if [ "$is_wsl2" = "true" ]; then
-          if ! task windows:test; then
-            echo "錯誤：task windows:test 連不上本機 Windows，請先排查 SSH 連線問題（見 playbook/wsl/network.yml），再跑 task add-peer" >&2
-            exit 1
-          fi
+        # 這支 task 假設目前這台機器一定是 WSL2（放在 playbook/wsl/ 底下
+        # 就是為了這個情境寫的，不再現場偵測 cmd.exe/wslpath 存不存在、也
+        # 不再透過 is_wsl2 這個參數讓 add-peer.yml 整段原生 Windows 的邏輯
+        # 可以被跳過——跟 WireGuard 本身是必選項、沒有 enable_wireguard
+        # 這種 toggle 是同一個道理。
+        #
+        # 整支 task 最先做的事就是先確認 task windows:test 能連得上（SSH 到
+        # 本機 Windows）——連不上就直接擋下來、不進入後面的互動輸入（VM
+        # IP、選 VM），不要問完一輪才在最後失敗，浪費你的時間。
+        if ! task windows:test; then
+          echo "錯誤：task windows:test 連不上本機 Windows，請先排查 SSH 連線問題（見 playbook/wsl/network.yml），再跑 task add-peer" >&2
+          exit 1
         fi
 
         # 故意跟 build:debian 分開成獨立的 task：VM 的 IP 是 DHCP 配的，
@@ -102,5 +97,4 @@ tasks:
           -i inventory/windows.ini \
           --ask-become-pass \
           --extra-vars "vm_endpoint_ip=${vm_ip}" \
-          --extra-vars "vm_name=${vm_name}" \
-          --extra-vars "is_wsl2=${is_wsl2}"
+          --extra-vars "vm_name=${vm_name}"
