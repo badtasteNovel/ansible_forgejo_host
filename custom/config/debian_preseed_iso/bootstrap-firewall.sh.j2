@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+
+# late_command（見 preseed.cfg.j2）本來也會在裝機階段嘗試套用這份 ufw 規則，
+# 但實測發現 in-target ufw ... 在 d-i 安裝環境自己的 chroot 裡執行會悄悄
+# 失效——ufw 開機後顯示 active，但規則數是 0，等於完全沒有防火牆在擋
+# （fail-open），late_command 又是用 ; 串接、任何一步失敗都不會中止，所以
+# 裝機過程完全看不出這個問題。這支腳本把同一份規則搬到這裡，讓使用者在
+# VM 真正開機後、自己手動執行——這裡才是能安全直接呼叫 `ufw enable` 的
+# 地方（不是 d-i chroot，是真正跑起來的系統，套用規則不會有風險）。
+#
+# 跟 bootstrap-sudo 不一樣，這支不是一次性、不會自我刪除：ufw 規則本身
+# 可以重複套用（ufw allow 遇到已經存在的規則只會跳過，不會出錯），留著
+# 可以在未來需要時再重新確認/套用一次，不是什麼敏感的「開後門」工具，
+# 不需要用完就刪。
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "錯誤：請用 sudo 執行這支程式（例如：sudo ~/bootstrap/bootstrap-firewall.sh）" >&2
+  exit 1
+fi
+
+# 跟 preseed.cfg.j2 原本 late_command 裡要套用的規則完全一樣：
+# (1) WireGuard 自己的 UDP 監聽埠——只准實體 LAN 網段連進來（WireGuard 的
+#     handshake 封包是從 peer 還沒加入隧道前的真實來源位址打過來的，不能
+#     用 WireGuard 子網本身去限制，否則自己把隧道堵死）；
+# (2) SSH port——只准 WireGuard peer 子網，跟 sshd 自己的 ListenAddress
+#     鎖定是同一個不變量，ufw 只是再加一層；
+# (3) chrony 的 123/udp——同樣只准 WireGuard peer 子網。
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow from {{ lan_subnet }} to any port {{ wireguard_listen_port }} proto udp
+ufw allow from {{ wireguard_peer_subnet }} to any port {{ vm_ssh_port }} proto tcp
+ufw allow from {{ wireguard_peer_subnet }} to any port 123 proto udp
+ufw --force enable
+
+echo "ufw 規則已套用："
+ufw status verbose

@@ -101,16 +101,25 @@ d-i finish-install/reboot_in_progress note
 ### 不代表保證未來不會再有其他原因讓這顆碟掛載失敗；這點跟網路（WireGuard）
 ### 完全無關，純粹是本機掛載失敗也會造成一樣的死鎖，值得留一條保險。
 ###
-### /cdrom/bootstrap-sudo（control-panel/debian.yml 交叉編譯出來、remaster-iso
-### 塞進 ISO 根目錄）複製進 charlie 家目錄——這是一支「要不要用」完全由使用者
-### 自己決定的一次性救援腳本：charlie 平常完全沒有密碼、只能用 SSH 金鑰登入，
-### 這是刻意的安全設計，這裡不去動它；但如果哪天 WireGuard 或 SSH 本身掛了，
-### 連 ESXi console 都進不去（console 登入需要密碼，charlie 跟 root 都沒有），
-### 到時候除了重建整台 VM 就沒有別的辦法了。bootstrap-sudo 讓使用者趁還能
-### SSH 進去的時候，自己執行一次（sudo ~/bootstrap-sudo），互動設一個密碼、
-### 把 charlie 加進 sudo group，跑完自己刪除自己——預設安全姿態完全不變，
-### 純粹是多留一條「使用者自己選擇要不要開」的退路。只複製檔案、不執行，
-### 執行與否由 charlie 自己決定。
+### /cdrom/bootstrap-sudo、/cdrom/bootstrap-firewall.sh（分別由
+### control-panel/debian.yml 交叉編譯/渲染出來、remaster-iso 塞進 ISO 根目錄）
+### 一起複製進 charlie 家目錄下的 ~/bootstrap/ 資料夾——兩支都是「要不要用、
+### 什麼時候用」完全由使用者自己決定的手動救援/維護腳本，只複製檔案、不
+### 執行，放在同一個資料夾方便管理：
+###
+### - bootstrap-sudo：charlie 平常完全沒有密碼、只能用 SSH 金鑰登入，這是
+###   刻意的安全設計，這裡不去動它；但如果哪天 WireGuard 或 SSH 本身掛了，
+###   連 ESXi console 都進不去（console 登入需要密碼，charlie 跟 root 都
+###   沒有），到時候除了重建整台 VM 就沒有別的辦法了。這支腳本讓使用者趁
+###   還能 SSH 進去的時候，自己執行一次（sudo ~/bootstrap/bootstrap-sudo），
+###   互動設一個密碼、把 charlie 加進 sudo group，跑完自己刪除自己——預設
+###   安全姿態完全不變，純粹是多留一條「使用者自己選擇要不要開」的退路。
+###
+### - bootstrap-firewall.sh：下面 late_command 本身不會去呼叫 ufw（理由見
+###   這份檔案自己開頭的說明——在 d-i chroot 裡套用 ufw 規則實測不可靠，
+###   會悄悄 fail-open），改成讓使用者開機後自己手動執行一次
+###   （sudo ~/bootstrap/bootstrap-firewall.sh）。跟 bootstrap-sudo 不同，
+###   這支不是一次性、不會自我刪除，可以重複執行。
 ###
 ### 下面這段（inotify / chrony / ufw）是直接烘焙進每一台 VM 的基礎設施調整，
 ### 不是這台 VM 專屬的身分資料，所以不像 SSH host key / wg0.conf 需要每台各自
@@ -127,32 +136,30 @@ d-i finish-install/reboot_in_progress note
 ###   「只要落差超過 1 秒、不限次數都允許直接 step」（預設只有開機後前幾次
 ###   才給這個額度），避免 VM 時鐘因為 host 暫停/搬遷等原因飄掉之後再也追不回來。
 ###
-### - ufw：預設 deny incoming / allow outgoing，只開三種東西：(1) WireGuard
-###   自己的 UDP 監聽埠——限定只准 {{ lan_subnet }}（實體 LAN 網段，不是
-###   {{ wireguard_peer_subnet }}）連進來：WireGuard 的 handshake 封包是從 peer
-###   還沒加入隧道前的真實來源位址打過來的，不可能用 {{ wireguard_peer_subnet }}
-###   這個「隧道通了才會有」的位址去限制，否則自己把隧道堵死；但所有合法的 peer
-###   （ESXi host、控制端本機）都在同一個實體 LAN 網段，所以用 {{ lan_subnet }}
-###   限制來源是可行的，比完全對任何來源開放多一層防護；(2) SSH port，限定只准
-###   {{ wireguard_peer_subnet }}——跟 sshd 自己的
-###   ListenAddress 鎖定是同一個不變量（SSH 全程只能從這個網段進來，沒有任何
-###   例外窗口），ufw 只是再加一層、不是另開例外；(3) chrony 的 123/udp，
-###   也限定只准 {{ wireguard_peer_subnet }}，對應上面 chrony 的 allow 設定。
-###   這裡故意不呼叫互動式的「ufw enable」——late_command 跑在 d-i 安裝環境
-###   自己的 chroot 裡，跟真正開機後的系統共用同一個 kernel/network
-###   namespace，貿然在這個階段把規則即時套用到 live 的 iptables 有風險；
-###   改成直接寫 ufw.conf 的 ENABLED=yes 設定檔 + enable systemd 服務，實際
-###   套用規則延後到 VM 第一次真正開機時才發生，跟這整段 late_command 一貫
-###   「只寫設定檔／enable 服務，不在裝機當下真的啟動東西」的做法一致。
+### - ufw：規則內容（預設 deny incoming / allow outgoing，只開 WireGuard 監聽埠
+###   /SSH port/chrony 123 這三種，來源分別限制成 {{ lan_subnet }} 跟
+###   {{ wireguard_peer_subnet }}）本來也打算在這裡的 late_command 裡用
+###   `in-target ufw ...` 直接套用，但實測發現這個指令在 d-i 安裝環境自己的
+###   chroot 裡執行會悄悄 fail-open（ufw 開機後顯示 active，規則數卻是 0，
+###   等於完全沒有防火牆在擋），late_command 又是用 ; 串接、任何一步失敗都
+###   不會中止，所以裝機過程完全看不出這個問題——已經在真實 ESXi 上踩過一次。
+###   現在改成不在這裡碰 ufw，規則內容搬進 bootstrap-firewall.sh（見上面
+###   bootstrap-sudo 那段的說明），讓使用者開機後自己手動執行一次，那裡才是
+###   能安全直接呼叫 `ufw enable` 的地方（不是 d-i chroot，是真正跑起來的
+###   系統）。
 d-i preseed/late_command string \
   mkdir -p /target/home/{{ vm_user }}/.ssh; \
   echo 'from="{{ wireguard_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
-  cp /cdrom/bootstrap-sudo /target/home/{{ vm_user }}/bootstrap-sudo; \
-  chmod 700 /target/home/{{ vm_user }}/bootstrap-sudo; \
+  mkdir -p /target/home/{{ vm_user }}/bootstrap; \
+  cp /cdrom/bootstrap-sudo /target/home/{{ vm_user }}/bootstrap/bootstrap-sudo; \
+  cp /cdrom/bootstrap-firewall.sh /target/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh; \
+  chmod 700 /target/home/{{ vm_user }}/bootstrap/bootstrap-sudo; \
+  chmod 700 /target/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh; \
+  chmod 700 /target/home/{{ vm_user }}/bootstrap; \
   chmod 700 /target/home/{{ vm_user }}/.ssh; \
   chmod 600 /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/.ssh; \
-  in-target chown {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/bootstrap-sudo; \
+  in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/bootstrap; \
   sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config; \
   sed -i '/^Port /d' /target/etc/ssh/sshd_config; \
   echo 'Port {{ ssh_port }}' >> /target/etc/ssh/sshd_config; \
@@ -183,13 +190,6 @@ d-i preseed/late_command string \
   echo 'makestep 1 -1' >> /target/etc/chrony/chrony.conf; \
   in-target systemctl disable systemd-timesyncd; \
   in-target systemctl enable chrony; \
-  in-target ufw default deny incoming; \
-  in-target ufw default allow outgoing; \
-  in-target ufw allow from {{ lan_subnet }} to any port {{ wireguard_listen_port }} proto udp; \
-  in-target ufw allow from {{ wireguard_peer_subnet }} to any port {{ ssh_port }} proto tcp; \
-  in-target ufw allow from {{ wireguard_peer_subnet }} to any port 123 proto udp; \
-  sed -i 's/^ENABLED=.*/ENABLED=yes/' /target/etc/ufw/ufw.conf; \
-  in-target systemctl enable ufw; \
   parted -s /dev/sdb mklabel gpt mkpart primary ext4 0% 100%; \
   partprobe /dev/sdb; \
   udevadm settle; \

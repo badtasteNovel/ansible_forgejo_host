@@ -201,6 +201,12 @@
         GOARCH: amd64
       changed_when: true
 
+    - name: 渲染 bootstrap-firewall.sh，放進 ISO 注入資料夾（late_command 在 d-i chroot 裡套用 ufw 規則不可靠，實測會悄悄 fail-open，見 bootstrap-firewall.sh.j2 開頭說明；這支腳本讓使用者在 VM 真正開機後自己手動執行一次，才是能安全呼叫 ufw enable 的地方）
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/bootstrap-firewall.sh.j2"
+        dest: "{{ preseed_output_dir }}/bootstrap-firewall.sh"
+        mode: "0700"
+
     - name: 渲染 preseed.cfg
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/preseed.cfg.j2"
