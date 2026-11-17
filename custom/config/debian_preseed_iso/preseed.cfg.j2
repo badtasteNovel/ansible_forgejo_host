@@ -109,8 +109,13 @@ d-i finish-install/reboot_in_progress note
 ###   root 都沒有），到時候除了重建整台 VM 就沒有別的辦法了。這支腳本讓
 ###   使用者趁還能 SSH 進去的時候，自己執行一次
 ###   （sudo ~/bootstrap/bootstrap-sudo），互動設一個密碼、把 charlie 加進
-###   sudo group，跑完自己刪除自己——預設安全姿態完全不變，純粹是多留一條
-###   「使用者自己選擇要不要開」的退路。
+###   sudo group，然後把這裡寫的 /etc/sudoers.d/charlie（NOPASSWD:ALL）整個
+###   檔案刪掉——這個檔案是 late_command 自己唯一寫過的東西，裝機之後不預期
+###   會有人手動加過其他規則進去，直接整檔刪掉即可。這條規則存在的唯一理由
+###   是 charlie 一開始沒有密碼，密碼設好之後就該撤掉，讓 sudo 改走剛加進去
+###   的 sudo group 那條標準規則（要密碼），不然等於白設了密碼，認證成功到
+###   拿到 root 之間還是沒有第二層關卡。跑完自己刪除自己——預設安全姿態完全
+###   不變，純粹是多留一條「使用者自己選擇要不要開」的退路。
 ###
 ### - bootstrap-firewall.sh：由 systemd 自動觸發，不是使用者手動決定。下面
 ###   late_command 不會直接呼叫 ufw（理由見這份檔案自己開頭的說明——在

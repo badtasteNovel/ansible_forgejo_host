@@ -15,10 +15,17 @@ const targetUser = "charlie"
 // 刻意的設計；但如果 WireGuard 或 SSH 本身掛了，連 ESXi console 都進不去，因為
 // console 登入需要密碼，而 charlie 跟 root 都沒有密碼。這支程式讓使用者在還能
 // SSH 進去的時候，自己決定要不要開這條退路：互動問一個密碼、把 charlie 加進
-// sudo group（charlie 其實已經有 /etc/sudoers.d/charlie 給的 NOPASSWD sudo，
-// 這裡額外加 sudo group 純粹是因為使用者要求「升級成 sudo group」，兩者不衝突）、
-// 設好密碼，然後自己刪除自己——避免留著一支「隨便一個碰到這台機器的人都能直接
-// 加密碼、拿 sudo」的程式在機器上。
+// sudo group、設好密碼，然後自己刪除自己——避免留著一支「隨便一個碰到這台機器
+// 的人都能直接加密碼、拿 sudo」的程式在機器上。
+//
+// 設完密碼後，會把 /etc/sudoers.d/charlie 那個 NOPASSWD:ALL 規則刪掉：那個
+// 規則原本存在是因為 charlie 一開始沒有密碼，sudo 要密碼的話根本沒東西可以
+// 輸入；現在既然已經有密碼了，NOPASSWD 這個例外就該跟著撤掉，讓 charlie 的
+// sudo 改回走剛剛才加進去的 sudo group 那條標準規則（Debian 預設 %sudo 這個
+// group 本來就是要密碼的）。不這樣做的話，前面加 sudo group 這個動作其實完全
+// 沒有意義——NOPASSWD:ALL 的範圍本來就比 sudo group 的規則更寬，不會被蓋掉，
+// sudo 還是一樣不用密碼，等於白設了這組密碼，認證成功到拿到 root 之間還是
+// 沒有第二層關卡。
 func main() {
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(os.Stderr, "錯誤：請用 sudo 執行這支程式（例如：sudo ~/bootstrap-sudo）")
@@ -70,8 +77,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("%s 已經加進 sudo group、也設好密碼了。WireGuard／SSH 都連不上的時候，\n", targetUser)
-	fmt.Println("可以直接從 ESXi 的 VM console 登入救援。")
+	if err := removeNopasswdOverride(targetUser); err != nil {
+		fmt.Fprintf(os.Stderr, "警告：刪除 /etc/sudoers.d/%s 失敗，sudo 目前可能還是不用密碼，請自己手動刪掉那個檔案：%v\n", targetUser, err)
+	}
+
+	fmt.Printf("%s 已經加進 sudo group、也設好密碼了，sudo 現在改成要密碼。WireGuard／SSH\n", targetUser)
+	fmt.Println("都連不上的時候，可以直接從 ESXi 的 VM console 登入救援。")
 
 	selfDelete()
 }
@@ -91,6 +102,20 @@ func setPassword(user, password string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// 刪掉 preseed 裝機時寫的 /etc/sudoers.d/<user>（NOPASSWD:ALL）整個檔案
+// ——那個檔案存在的唯一理由是 charlie 一開始沒有密碼，現在密碼已經設好
+// 了，這個例外就沒有存在的必要。這個檔案是 late_command 自己唯一寫過的
+// 東西，裝機之後預期不會有人手動加過其他規則進去，所以直接整檔刪掉，不
+// 另外做逐行比對、改寫、visudo 驗證那一套。檔案本來就不存在（例如這支
+// 腳本被跑過兩次）也不算錯誤，直接當作已經處理過。
+func removeNopasswdOverride(user string) error {
+	path := "/etc/sudoers.d/" + user
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
