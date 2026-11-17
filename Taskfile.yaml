@@ -40,6 +40,16 @@ tasks:
     cmds:
       - |
         set -euo pipefail
+        # 先在這裡（乾淨的互動 TTY）預熱一次 sudo，而不是讓 Ansible 的
+        # --ask-become-pass 第一次呼叫 become 時才處理：sudo 時間戳過期後
+        # 第一次呼叫常會印一次性的 lecture 提示文字（"We trust you have
+        # received..."），這段文字夾在正常的密碼提示前面時，Ansible 解析
+        # become 密碼提示的邏輯偶爾會卡住、不是報錯而是整個不動——實測遇過
+        # 卡在 playbook 裡第一個 become: true 的 task（確保 /etc/wireguard/
+        # 存在那個），手動跑一次 sudo 之後重跑就正常，這裡把那個手動步驟
+        # 直接內建進來，不用每次卡住都靠使用者自己發現、自己補。
+        sudo -v
+
         # 這支 task 假設目前這台機器一定是 WSL2（放在 playbook/wsl/ 底下
         # 就是為了這個情境寫的，不再現場偵測 cmd.exe/wslpath 存不存在、也
         # 不再透過 is_wsl2 這個參數讓 add-peer.yml 整段原生 Windows 的邏輯
