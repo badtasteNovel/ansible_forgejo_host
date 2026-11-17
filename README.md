@@ -6,18 +6,11 @@
 ![Hypervisor](https://img.shields.io/badge/hypervisor-ESXi_standalone-informational)
 
 > 用 Ansible + preseed 全自動建置一台 Debian 13 VM，跑在沒有 vCenter 的單台 ESXi host 上；VM 同時是 WireGuard server，`charlie` 這個 sudo 使用者沒有密碼、只能用 SSH 金鑰登入。全程不碰任何 vSphere/ESXi API，只靠 SSH/scp + ESXi 自己的 `vmkfstools`。**Register VM 跟 Power On 是刻意保留的手動步驟**，自動化到此為止。
-
 ---
+## 功能(control-panel)
 
-## ✨ 功能特色 (Features)
-
-- 🖥️ **無人值守裝機**：preseed 自動完成分割（LVM，系統碟）、第二顆資料碟的手動切割格式化、帳號、網路設定，裝完就能直接 SSH 進去。
-- 🔑 **SSH host key 預先產生**：裝機前就知道 VM 的 host key fingerprint，裝機時直接蓋掉 `openssh-server` 自動生成的那組，不用 `ssh-keyscan`、不用等開機的 race。
-- 🔒 **`charlie` 永遠無密碼**：鎖住密碼、停用 root 登入，只能用 SSH 金鑰登入；`NOPASSWD` sudo。另外提供 `bootstrap-sudo`——一支塞進 ISO 的一次性救援程式，讓使用者自己決定要不要在 VM 上開一條「設密碼 + 加入 sudo group」的退路，用完自我刪除。
-- 🌐 **WireGuard 是必選項，不是選用功能**：每台 VM 一定是 WireGuard server，`sshd` 鎖定只監聽 WireGuard 位址（`10.105.0.1`），`ufw` 再加一層防護。要把目前這台機器（WSL2 + 原生 Windows 可以一次搞定兩邊）接進隧道，另外跑 `task add-peer`。
-- 🗂️ **匿名 peer 位置**：build 的時候只決定「要留幾個 peer 名額」，金鑰先產生好；之後哪台機器要接進來，用 `task add-peer` 現場認領一個還沒被用掉的名額。
-- 🚫 **刻意不碰 vSphere API**：不裝 `pyvmomi`、不用 `community.vmware`——前身版本在這條路上踩過一連串真實的坑（版本不合、`VmomiJSONEncoder` 壞掉、`cdrom` 參數驗證 bug、hostname 混淆、1GB 檔案的 10 秒上傳 timeout），全部都是依賴那套 collection 本身的症狀。現在只用純 SSH + `scp` + 本地 CLI 工具 `vmkfstools`，Register/Power On 手動做。
-- 🧾 **官方 ISO 完整性驗證**：`task verify-iso` 現場下載 Debian 簽章金鑰、比對 fingerprint、`gpgv` + `sha512sum` 驗證，不在 repo 裡存長期信任材料。
+- 🖥️ **control-panel軟體架構**：vm 的設計主要是為了control-panel而設計。
+- 🌐 **cluster內部所有節點透過wireguard進行連線**：以此專案建立的vm，被賦予10.105.0.1 的ip 位置，作為 cluster 的 control-panel，用10.105.0.0/24 進行節點溝通。
 
 ---
 
