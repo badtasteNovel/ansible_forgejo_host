@@ -116,21 +116,16 @@
     datastore_data_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-data.vmdk"
     datastore_harbor_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-harbor.vmdk"
 
-    # CA/leaf 憑證獨立放在 custom/generated/ca/（不是 custom/generated/keys/
-    # 底下）：跟 SSH/WireGuard 金鑰性質不同，分開分類比較清楚。整個
-    # custom/generated/ca/ 都不進版控（見 custom/generated/ca/.gitignore）——
-    # 這些東西已經在本機磁碟上持續存在（community.crypto 的模組本身就是「已
-    # 存在則不重建」），不需要靠 git 來保存。底下再分 public/（憑證本體）跟
-    # private/（私鑰/CSR）純粹是檔案組織上的習慣，私鑰跟公開憑證分開放、
-    # 不混在同一層，跟進不進版控無關。
-    #
-    # 這個 CA 現在屬於 nginx-proxy（不是 harbor 專屬），是每台 VM 都會有的一套
-    # ——以後每多一個服務要掛 HTTPS vhost，都是用同一個 CA 簽自己的 leaf 憑證，
-    # 所以路徑不叫 ca/harbor/，叫 ca/{{ vm_name }}（每台 VM 一個 CA，底下可能
-    # 簽出好幾份不同服務的 leaf 憑證）。
-    proxy_ca_dir: "{{ generated_dir }}/ca/{{ vm_name }}"
-    proxy_ca_private_dir: "{{ proxy_ca_dir }}/private"
-    proxy_ca_public_dir: "{{ proxy_ca_dir }}/public"
+    # CA/leaf 憑證直接生在 preseed_srv_output_dir/nginx/certs/ 底下——不是另外
+    # 放一個獨立的 custom/generated/ca/ 再複製過去：這個專案每次 build 前都是
+    # 先手動跑 task clean 整個砍掉 custom/generated/ 重來，CA 材料跟 preseed
+    # staging 區的生命週期其實是一樣的（都是「這次 build 全新生出來的東西」），
+    # 分開放只是多一層複製的間接性，沒有實際的好處。CA 私鑰（ca.key）跟兩份
+    # CSR（ca.csr/harbor.csr）生在這裡之後，packaging 前會被專門的清理 task
+    # 刪掉（VM 不需要用到 CA 私鑰簽任何東西，CSR 本身也只是中間產物）；
+    # harbor.key 是 Harbor vhost 自己的 leaf 私鑰，nginx-proxy 要用它終止 TLS，
+    # 這個會留著進 ISO。
+    nginx_certs_dir: "{{ preseed_srv_output_dir }}/nginx/certs"
 
     hypervisor_hostname: "{{ lookup('env', 'HYPERVISOR_HOSTNAME') }}"
     hypervisor_username: "{{ lookup('env', 'HYPERVISOR_USERNAME') }}"
@@ -171,15 +166,6 @@
         - "{{ keys_dir }}/known-hosts/{{ vm_name }}" # ssh_host_key_path 的上層目錄
         - "{{ preseed_output_dir }}"
         - "{{ iso_output_dir }}"
-
-    - name: 確保 custom/generated/ca/{{ vm_name }}/{private,public}/ 存在（nginx-proxy 的 CA，每台 VM 都要）
-      ansible.builtin.file:
-        path: "{{ item }}"
-        state: directory
-        mode: "0700"
-      loop:
-        - "{{ proxy_ca_private_dir }}"
-        - "{{ proxy_ca_public_dir }}"
 
     - name: 產生 SSH 金鑰對（charlie 登入用，若已存在則不重建）
       community.crypto.openssh_keypair:
@@ -274,7 +260,7 @@
         dest: "{{ preseed_bootstrap_output_dir }}/bootstrap-firewall.sh"
         mode: "0700"
 
-    - name: 把 custom/preseed_iso/srv/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 /srv 的結構，一次性全部搬過去，不用每個檔案各寫一個 task（包含 rootless_podman_user_setup.yml——這是 nginx-proxy-install.yml/harbor-install.yml 在 VM 上都要 include 的共用 task fragment，原始檔跟著這整棵 srv/ 樹放在 custom/preseed_iso/srv/ansible/playbook/ 底下，不是放在 custom/scripts/ 裡：custom/scripts/ 只放工作目錄（控制節點）自己會用到的東西，任何裝機過程會被複製進 VM 的檔案都該放進 custom/preseed_iso/）。裡面幾個 .j2 樣板檔案也會原封不動一起被搬過去，之後對應的渲染 task 會在同一個目錄下產生渲染好的同名（無 .j2）檔案，渲染完會有一個專門的清理 task 把這些用不到的 .j2 原始樣板刪掉（見下面「清掉 srv/ 底下還留著 .j2 副檔名的原始樣板」）
+    - name: 把 custom/preseed_iso/srv/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 /srv 的結構，一次性全部搬過去，不用每個檔案各寫一個 task（包含 rootless_podman_user_setup.yml——這是 nginx-proxy-install.yml/harbor-install.yml 在 VM 上都要 include 的共用 task fragment，原始檔跟著這整棵 srv/ 樹放在 custom/preseed_iso/srv/ansible/playbook/ 底下，不是放在 custom/scripts/ 裡：custom/scripts/ 只放工作目錄（控制節點）自己會用到的東西，任何裝機過程會被複製進 VM 的檔案都該放進 custom/preseed_iso/）。裡面幾個 .j2 樣板檔案也會原封不動一起被搬過去，之後對應的渲染 task 會在同一個目錄下產生渲染好的同名（無 .j2）檔案，渲染完會有一個專門的清理 task 把這些用不到的 .j2 原始樣板刪掉（見下面「清掉 srv/ 底下還留著 .j2 副檔名的原始樣板」）。srv/nginx/certs/ 底下放了一個 .gitignore（憑證是裝機前才簽出來的執行期產物，不會有真正的靜態來源檔案，這份 .gitignore 本身也特意擋掉這個資料夾被意外塞進真正的憑證/私鑰），純粹是為了讓這個遞迴複製能順便建出這一層目錄，不用再額外開一個 task 專門 mkdir
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/"
         dest: "{{ preseed_srv_output_dir }}/"
@@ -282,16 +268,17 @@
 
     - name: "nginx-proxy 是強制功能：CA 產生、設定檔渲染、安裝 playbook 複製進 ISO 注入資料夾"
       block:
-        - name: 產生 nginx-proxy 本地 CA 私鑰（若已存在則不重建——留在控制節點，不會被複製進 VM，VM 只拿得到 CA 憑證本身）
+        - name: 產生 nginx-proxy 本地 CA 私鑰（直接生在 nginx_certs_dir 底下，若已存在則不重建）
           community.crypto.openssl_privatekey:
-            path: "{{ proxy_ca_private_dir }}/ca.key"
+            path: "{{ nginx_certs_dir }}/ca.key"
             type: RSA
             size: 4096
+            mode: "0600"
 
-        - name: 產生 nginx-proxy CA 的 CSR（CA:TRUE，自簽用；CSR 不含私鑰，但沒有獨立用途，一樣放 private/ 跟對應的私鑰放一起）
+        - name: 產生 nginx-proxy CA 的 CSR（CA:TRUE，自簽用；CSR 只是中間產物，packaging 前會被清掉，不會留在 ISO 裡）
           community.crypto.openssl_csr:
-            path: "{{ proxy_ca_private_dir }}/ca.csr"
-            privatekey_path: "{{ proxy_ca_private_dir }}/ca.key"
+            path: "{{ nginx_certs_dir }}/ca.csr"
+            privatekey_path: "{{ nginx_certs_dir }}/ca.key"
             common_name: "{{ vm_name }} nginx-proxy Local CA"
             organization_name: "{{ vm_name }}"
             basic_constraints:
@@ -304,17 +291,11 @@
 
         - name: 自簽 nginx-proxy CA 憑證（10 年，若已存在則不重建）
           community.crypto.x509_certificate:
-            path: "{{ proxy_ca_public_dir }}/ca.crt"
-            privatekey_path: "{{ proxy_ca_private_dir }}/ca.key"
-            csr_path: "{{ proxy_ca_private_dir }}/ca.csr"
+            path: "{{ nginx_certs_dir }}/ca.crt"
+            privatekey_path: "{{ nginx_certs_dir }}/ca.key"
+            csr_path: "{{ nginx_certs_dir }}/ca.csr"
             provider: selfsigned
             selfsigned_not_after: "+3650d"
-
-        - name: 把 CA 憑證複製進 ISO 注入資料夾（CA 私鑰刻意不複製——VM 不需要用它簽任何東西，留在控制節點就好，以後要幫新服務簽 leaf 憑證都在控制節點做）——放進 preseed_srv_output_dir/nginx/certs/，直接對齊最終 /srv/nginx/certs/ 的結構
-          ansible.builtin.copy:
-            src: "{{ proxy_ca_public_dir }}/ca.crt"
-            dest: "{{ preseed_srv_output_dir }}/nginx/certs/ca.crt"
-            remote_src: true
             mode: "0644"
 
         - name: 渲染 nginx_proxy_runtime_vars.yml，放進 ISO 注入資料夾（nginx-proxy-install.yml 要用的少數幾個值）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構
@@ -325,16 +306,17 @@
 
     - name: "Harbor 相關檔案一律無條件烘焙進 ISO：leaf 憑證/vhost conf/設定檔產生、渲染、安裝 playbook 複製進 ISO 注入資料夾（裝不裝是 bootstrap-services 開機後才決定的事，不是這裡）"
       block:
-        - name: 產生 Harbor leaf 私鑰（若已存在則不重建）
+        - name: 產生 Harbor leaf 私鑰（直接生在 nginx_certs_dir 底下——這兩個檔案最終會進 /srv/nginx/certs/，不是 /srv/harbor/，Harbor 自己不碰 TLS；若已存在則不重建）
           community.crypto.openssl_privatekey:
-            path: "{{ proxy_ca_private_dir }}/harbor.key"
+            path: "{{ nginx_certs_dir }}/harbor.key"
             type: RSA
             size: 4096
+            mode: "0640"
 
-        - name: 產生 Harbor leaf 憑證的 CSR（CN/SAN 是 harbor_hostname，不是 IP——nginx-proxy 用 hostname 分流，TLS 驗證看的是這個名字，不是 Harbor 自己的位址）
+        - name: 產生 Harbor leaf 憑證的 CSR（CN/SAN 是 harbor_hostname，不是 IP——nginx-proxy 用 hostname 分流，TLS 驗證看的是這個名字，不是 Harbor 自己的位址；CSR 只是中間產物，packaging 前會被清掉）
           community.crypto.openssl_csr:
-            path: "{{ proxy_ca_private_dir }}/harbor.csr"
-            privatekey_path: "{{ proxy_ca_private_dir }}/harbor.key"
+            path: "{{ nginx_certs_dir }}/harbor.csr"
+            privatekey_path: "{{ nginx_certs_dir }}/harbor.key"
             common_name: "{{ harbor_hostname }}"
             organization_name: "{{ vm_name }}"
             subject_alt_name:
@@ -348,22 +330,13 @@
 
         - name: 用 nginx-proxy CA 簽發 Harbor leaf 憑證（825 天，每次重跑都重簽——跟 lg-laravel 那套的慣例一致：換 leaf 不換 CA）
           community.crypto.x509_certificate:
-            path: "{{ proxy_ca_public_dir }}/harbor.crt"
-            csr_path: "{{ proxy_ca_private_dir }}/harbor.csr"
+            path: "{{ nginx_certs_dir }}/harbor.crt"
+            csr_path: "{{ nginx_certs_dir }}/harbor.csr"
             provider: ownca
-            ownca_path: "{{ proxy_ca_public_dir }}/ca.crt"
-            ownca_privatekey_path: "{{ proxy_ca_private_dir }}/ca.key"
+            ownca_path: "{{ nginx_certs_dir }}/ca.crt"
+            ownca_privatekey_path: "{{ nginx_certs_dir }}/ca.key"
             ownca_not_after: "+825d"
-
-        - name: 把 Harbor leaf 憑證/私鑰複製進 ISO 注入資料夾（這兩個檔案最終會進 /srv/nginx/certs/，不是 /srv/harbor/——Harbor 自己不碰 TLS）——放進 preseed_srv_output_dir/nginx/certs/，直接對齊最終 /srv/nginx/certs/ 的結構
-          ansible.builtin.copy:
-            src: "{{ item.src }}"
-            dest: "{{ preseed_srv_output_dir }}/nginx/certs/{{ item.dest }}"
-            remote_src: true
-            mode: "{{ item.mode }}"
-          loop:
-            - { src: "{{ proxy_ca_public_dir }}/harbor.crt", dest: harbor.crt, mode: "0644" }
-            - { src: "{{ proxy_ca_private_dir }}/harbor.key", dest: harbor.key, mode: "0640" }
+            mode: "0644"
 
         - name: 渲染 harbor.conf（nginx-proxy 後面 Harbor 的 vhost 設定），放進 ISO 注入資料夾——放進 preseed_srv_output_dir/nginx/conf.d/，直接對齊最終 /srv/nginx/conf.d/ 的結構
           ansible.builtin.template:
@@ -383,7 +356,25 @@
             dest: "{{ preseed_srv_output_dir }}/ansible/playbook/harbor_runtime_vars.yml"
             mode: "0600"
 
-    - name: 清掉 srv/ 底下還留著 .j2 副檔名的原始樣板（上面「把整個 srv/ 資料夾放進 ISO 注入資料夾」那個 task 連這幾支樣板原始檔也一起搬過來了，但這裡已經各自渲染出同名、無 .j2 的正式檔案，原始樣板留著沒用、還可能被誤會成真正在用的設定檔）
+    - name: 找出 nginx/certs/ 裡面不是正式憑證/私鑰的東西（CA 自己的私鑰、兩份 CSR 中間產物、拿來佔位建目錄用的 .gitignore）——範圍只限定在這個資料夾，不是整個 srv/ 都搜
+      ansible.builtin.find:
+        paths: "{{ preseed_srv_output_dir }}/nginx/certs"
+        excludes:
+          - ca.crt
+          - harbor.crt
+          - harbor.key
+        hidden: true
+      register: nginx_certs_cruft_files
+
+    - name: 清掉上面找到的這些檔案
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ nginx_certs_cruft_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+
+    - name: 清掉 srv/ 底下還留著 .j2 副檔名的原始樣板（上面「把整個 srv/ 資料夾放進 ISO 注入資料夾」那個 task 連這幾支樣板原始檔也一起搬過來了，這裡已經各自渲染出同名、無 .j2 的正式檔案，原始樣板留著沒用、還可能被誤會成真正在用的設定檔）
       ansible.builtin.file:
         path: "{{ preseed_srv_output_dir }}/{{ item }}"
         state: absent
