@@ -1,0 +1,147 @@
+---
+# Harbor 版本升級——由 /srv/harbor/rotate/update.sh 呼叫（ansible-navigator run），
+# 跑在 VM 自己身上（hosts: localhost, connection: local）。只處理「換版本、
+# podman-compose up -d 重建容器」這件事本身，不重建 rootless 使用者（已經
+# 存在，harbor-install.yml 當初建過了）、不重建 robot 帳號（密碼/帳密不
+# 輪替，維持原本的 registries.conf.d mirror/mirror-auth.json 繼續有效）、
+# 不重新渲染 harbor.yml（裡面的密碼要跟 postgres 資料庫裡實際的密碼一致，
+# 不能亂動——Harbor 的 admin/db 密碼只有資料庫全新是空的時候才會套用設定
+# 檔裡的值，沙已經存在的安裝重跑只會沿用資料庫裡本來就有的密碼，所以
+# harbor.yml 本來就不需要重新渲染，留著原本那份就對）。
+#
+# 升級的核心跟 Harbor 官方文件寫的流程一樣：保留 harbor.yml、保留資料卷
+# （{{ vm_harbor_mount_path }}），只換掉 installer 目錄裡的檔案（新版的
+# docker-compose.yml、prepare、images），重跑 prepare 重新產生
+# docker-compose.yml，podman-compose up -d 重建容器——offline installer
+# tarball 裡面只有 harbor.yml.tmpl（範本），不是 harbor.yml 本身，所以
+# unarchive 不會覆蓋掉已經在用的 harbor.yml。
+
+- name: 把這台 VM 上的 Harbor 升級到指定版本
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    harbor_user: harbor
+    harbor_home: /srv/harbor
+    vm_harbor_mount_path: /var/lib/harbor
+    harbor_installer_cache: /var/cache/harbor-installer
+    harbor_tgz_name: "harbor-offline-installer-{{ harbor_version }}.tgz"
+    harbor_tgz_cached_path: "{{ harbor_installer_cache }}/{{ harbor_tgz_name }}"
+    harbor_internal_http_port: "{{ (lookup('file', '/srv/harbor/harbor.yml') | from_yaml).http.port }}"
+
+  tasks:
+    - name: 確認有帶 harbor_version（update.sh 會用 --extra-vars 傳，這裡沒有就直接中止，不要用空值悶著頭繼續）
+      ansible.builtin.assert:
+        that:
+          - harbor_version is defined
+          - harbor_version | length > 0
+        fail_msg: "沒有指定 harbor_version（例如 v2.16.0），中止升級"
+
+    - name: 查 harbor 使用者的 uid（組 rootless 執行環境變數要用；使用者本身是 harbor-install.yml 當初建好的，這裡不重建）
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ harbor_user }}"
+
+    - name: 組 rootless 執行環境變數
+      ansible.builtin.set_fact:
+        rootless_podman_env:
+          XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[harbor_user][1] }}"
+          DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ansible_facts.getent_passwd[harbor_user][1] }}/bus"
+          HOME: "/home/{{ harbor_user }}"
+          REGISTRY_AUTH_FILE: /etc/containers/mirror-auth.json
+
+    # ────────────────────────── 下載／校驗新版 offline installer ──────────────────────────
+
+    - name: 查詢 GitHub release 上這個版本 installer 的官方 sha256（digest 欄位）
+      ansible.builtin.uri:
+        url: "https://api.github.com/repos/goharbor/harbor/releases/tags/{{ harbor_version }}"
+        return_content: true
+      register: harbor_release_info
+
+    - name: 算出 installer tgz 的官方 digest
+      ansible.builtin.set_fact:
+        harbor_tgz_digest: "{{ harbor_release_info.json.assets | selectattr('name', 'equalto', harbor_tgz_name) | map(attribute='digest') | first }}"
+
+    - name: 擋下「GitHub API 查不到這個版本/這個檔名」的情況
+      ansible.builtin.assert:
+        that:
+          - harbor_tgz_digest is defined
+          - harbor_tgz_digest | length > 0
+        fail_msg: "GitHub release {{ harbor_version }} 裡找不到 {{ harbor_tgz_name }} 的官方 sha256，中止升級（可能是版本號打錯，或 GitHub API 被限流）"
+
+    - name: 下載新版 Harbor offline installer（已快取就跳過；get_url 本身會校驗 checksum，對不上直接失敗）
+      ansible.builtin.get_url:
+        url: "https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}/{{ harbor_tgz_name }}"
+        dest: "{{ harbor_tgz_cached_path }}"
+        checksum: "{{ harbor_tgz_digest }}"
+        owner: "{{ harbor_user }}"
+        group: "{{ harbor_user }}"
+        mode: "0644"
+        timeout: 300
+
+    - name: 解壓新版 bundle 到 {{ harbor_home }}（覆蓋掉舊版的 installer 檔案；只有 harbor.yml.tmpl，不會動到正在用的 harbor.yml）
+      ansible.builtin.unarchive:
+        src: "{{ harbor_tgz_cached_path }}"
+        dest: "{{ harbor_home }}"
+        remote_src: true
+        owner: "{{ harbor_user }}"
+        group: "{{ harbor_user }}"
+        extra_opts:
+          - --strip-components=1
+
+    - name: podman load 新版 image bundle（進 harbor 使用者的 image store）
+      ansible.builtin.command: podman load -i {{ harbor_home }}/harbor.{{ harbor_version }}.tar.gz
+      become: true
+      become_user: "{{ harbor_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: true
+
+    # ────────────────────────── 重跑 prepare → 重建容器 ──────────────────────────
+
+    - name: 跑新版 goharbor/prepare（用既有的 harbor.yml 重新產生 docker-compose.yml）
+      ansible.builtin.command: >
+        podman run --rm --privileged --pull=never
+        -v {{ harbor_home }}:/input:z
+        -v {{ vm_harbor_mount_path }}:/data:z
+        -v {{ harbor_home }}:/compose_location:z
+        -v {{ harbor_home }}/common/config:/config:z
+        -v /:/hostfs
+        goharbor/prepare:{{ harbor_version }} prepare --with-trivy
+      become: true
+      become_user: "{{ harbor_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: true
+
+    - name: 移除新產出 docker-compose.yml 裡的 log service、把 proxy service 對外埠限制在 127.0.0.1——跟 harbor-install.yml 當初做的事完全一樣，每次重跑 prepare 都要重新套用一次
+      ansible.builtin.command: >
+        yq -i '
+          del(.services.log)
+          | (.services[] | select(has("depends_on")).depends_on) |= map(select(. != "log"))
+          | .services[].logging = {"driver": "journald"}
+          | .services.proxy.ports = ["127.0.0.1:{{ harbor_internal_http_port }}:8080"]
+        ' {{ harbor_home }}/docker-compose.yml
+      become: true
+      become_user: "{{ harbor_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: true
+
+    - name: podman-compose up -d（會重建 image 換了的容器，其他服務不動）
+      ansible.builtin.command: podman-compose -f {{ harbor_home }}/docker-compose.yml up -d
+      become: true
+      become_user: "{{ harbor_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: true
+
+    - name: 等 Harbor API healthy
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ harbor_internal_http_port }}/api/v2.0/health"
+        status_code: 200
+      register: harbor_health_check
+      until: harbor_health_check.json.status is defined and harbor_health_check.json.status == "healthy"
+      retries: 60
+      delay: 5
+
+    - name: 印出結果
+      ansible.builtin.debug:
+        msg: "Harbor 已升級到 {{ harbor_version }}。"

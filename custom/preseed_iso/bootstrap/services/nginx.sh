@@ -6,9 +6,8 @@ set -euo pipefail
 # image 才吃得到 Harbor 的 pull-through cache。nginx-proxy 是強制功能，不
 # 像 harbor.sh 要看 INSTALL_HARBOR 分支，這支沒有條件判斷。
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=config.sh
-source "$SCRIPT_DIR/config.sh"
+# shellcheck source=/srv/ansible/config.sh
+source /srv/ansible/config.sh
 
 echo "==> 開始安裝 nginx-proxy（ansible-navigator run nginx-proxy-install.yml）..." >&2
 run_navigator "$NGINX_PROXY_PLAYBOOK"

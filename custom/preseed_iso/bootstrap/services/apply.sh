@@ -24,8 +24,8 @@ set -euo pipefail
 # 跑完了，不需要額外的檔案來擋重跑。
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=config.sh
-source "$SCRIPT_DIR/config.sh"
+# shellcheck source=/srv/ansible/config.sh
+source /srv/ansible/config.sh
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "錯誤：請用 root 執行這支程式" >&2
@@ -45,6 +45,8 @@ HARBOR_URL=$(jq -r '.harbor_url' <<<"$answers")
 HARBOR_USERNAME=$(jq -r '.harbor_username' <<<"$answers")
 HARBOR_PASSWORD=$(jq -r '.harbor_password' <<<"$answers")
 WIREGUARD_VM_ADDRESS=$(jq -r '.wireguard_vm_address' <<<"$answers")
+
+"$SCRIPT_DIR/software-install.sh"
 
 ensure_navigator_tools
 ensure_ee_image

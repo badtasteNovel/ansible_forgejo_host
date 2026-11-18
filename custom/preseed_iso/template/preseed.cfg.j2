@@ -51,10 +51,11 @@ d-i base-installer/kernel/image string linux-image-amd64
 ### 都有——Harbor 裝不裝是開機後 bootstrap-services（見下面 services/ 那組
 ### shell script 的說明）才會知道的決定，build 這個當下沒有 install_harbor
 ### 這種旗標可以判斷，套件清單只能全部無條件裝好：yq 是 harbor-install.yml
-### 要用的（改 docker-compose.yml）；pipx 是 services/config.sh 用來裝
+### 要用的（改 docker-compose.yml）；pipx 是這裡的 late_command 自己用來裝
 ### ansible-builder/ansible-navigator 的（這兩個工具不在 Debian 的 apt 套件
-### 庫裡，只能透過 pipx 裝）；jq/curl 是 services/*.sh 自己要用的（解析表單
-### JSON/proxy_map.json、抓外部 Harbor 的 CA）。
+### 庫裡，只能透過 pipx 裝；裝到哪裡/怎麼用見 ~/config/config.sh 跟
+### /srv/ansible/ee.conf）；jq/curl 是 services/*.sh、/srv/harbor/rotate/*.sh
+### 自己要用的（解析表單 JSON/proxy_map.json、抓外部 Harbor 的 CA）。
 tasksel tasksel/first multiselect standard
 d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible yq pipx jq curl
 d-i pkgsel/upgrade select none
@@ -72,16 +73,8 @@ d-i preseed/late_command string \
   in-target pipx install ansible-navigator; \
   mkdir -p /target/home/{{ vm_user }}/.ssh; \
   echo 'from="{{ wireguard_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
-  mkdir -p /target/home/{{ vm_user }}/bootstrap; \
-  cp /cdrom/bootstrap-sudo /target/home/{{ vm_user }}/bootstrap/bootstrap-sudo; \
-  cp /cdrom/bootstrap-firewall.sh /target/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh; \
-  cp /cdrom/bootstrap-services /target/home/{{ vm_user }}/bootstrap/bootstrap-services; \
-  cp -r /cdrom/services /target/home/{{ vm_user }}/bootstrap/services; \
-  chmod 700 /target/home/{{ vm_user }}/bootstrap/bootstrap-sudo; \
-  chmod 700 /target/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh; \
-  chmod 700 /target/home/{{ vm_user }}/bootstrap/bootstrap-services; \
-  chmod -R 700 /target/home/{{ vm_user }}/bootstrap/services; \
-  chmod 700 /target/home/{{ vm_user }}/bootstrap; \
+  cp -r /cdrom/bootstrap /target/home/{{ vm_user }}/bootstrap; \
+  chmod -R 700 /target/home/{{ vm_user }}/bootstrap; \
   chmod 700 /target/home/{{ vm_user }}/.ssh; \
   chmod 600 /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/.ssh; \
@@ -126,31 +119,8 @@ d-i preseed/late_command string \
   echo 'makestep 1 -1' >> /target/etc/chrony/chrony.conf; \
   in-target systemctl disable systemd-timesyncd; \
   in-target systemctl enable chrony; \
-  mkdir -p /target/opt/bootstrap/common; \
-  cp /cdrom/rootless_podman_user_setup.yml /target/opt/bootstrap/common/rootless_podman_user_setup.yml; \
-  chmod 700 /target/opt/bootstrap/common; \
-  chmod 600 /target/opt/bootstrap/common/rootless_podman_user_setup.yml; \
-  mkdir -p /target/opt/bootstrap/nginx/certs /target/opt/bootstrap/nginx/conf.d; \
-  cp /cdrom/nginx-proxy-ca.crt /target/opt/bootstrap/nginx/certs/ca.crt; \
-  cp /cdrom/nginx_proxy_runtime_vars.yml /target/opt/bootstrap/nginx/nginx_proxy_runtime_vars.yml; \
-  cp /cdrom/nginx-proxy-install.yml /target/opt/bootstrap/nginx/nginx-proxy-install.yml; \
-  cp /cdrom/harbor.conf /target/opt/bootstrap/nginx/conf.d/harbor.conf; \
-  cp /cdrom/harbor.crt /target/opt/bootstrap/nginx/certs/harbor.crt; \
-  cp /cdrom/harbor.key /target/opt/bootstrap/nginx/certs/harbor.key; \
-  chmod 700 /target/opt/bootstrap/nginx; \
-  chmod 600 /target/opt/bootstrap/nginx/certs/ca.crt /target/opt/bootstrap/nginx/nginx_proxy_runtime_vars.yml /target/opt/bootstrap/nginx/nginx-proxy-install.yml /target/opt/bootstrap/nginx/conf.d/harbor.conf /target/opt/bootstrap/nginx/certs/harbor.crt /target/opt/bootstrap/nginx/certs/harbor.key; \
-  mkdir -p /target/opt/bootstrap/harbor; \
-  cp /cdrom/harbor.yml /target/opt/bootstrap/harbor/harbor.yml; \
-  cp /cdrom/harbor_runtime_vars.yml /target/opt/bootstrap/harbor/harbor_runtime_vars.yml; \
-  cp /cdrom/harbor-install.yml /target/opt/bootstrap/harbor/harbor-install.yml; \
-  cp /cdrom/proxy_map.json /target/opt/bootstrap/harbor/proxy_map.json; \
-  chmod 700 /target/opt/bootstrap/harbor; \
-  chmod 600 /target/opt/bootstrap/harbor/harbor.yml /target/opt/bootstrap/harbor/harbor_runtime_vars.yml /target/opt/bootstrap/harbor/harbor-install.yml /target/opt/bootstrap/harbor/proxy_map.json; \
-  mkdir -p /target/opt/bootstrap/ansible-ee; \
-  cp /cdrom/execution-environment.yml /target/opt/bootstrap/ansible-ee/execution-environment.yml; \
-  cp /cdrom/ansible-navigator.yml /target/opt/bootstrap/ansible-ee/ansible-navigator.yml; \
-  chmod 755 /target/opt/bootstrap/ansible-ee; \
-  chmod 644 /target/opt/bootstrap/ansible-ee/execution-environment.yml /target/opt/bootstrap/ansible-ee/ansible-navigator.yml; \
+  cp -r /cdrom/srv /target/srv; \
+  chmod -R 700 /target/srv; \
   parted -s /dev/sdc mklabel gpt mkpart primary ext4 0% 100%; \
   partprobe /dev/sdc; \
   udevadm settle; \

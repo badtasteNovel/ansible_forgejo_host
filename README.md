@@ -135,12 +135,18 @@ task clean         # 清掉 build 產物（keys 會額外二次確認）
 ├── custom/
 │   ├── iso/                       # 放官方來源 ISO + manifest.json（OS → iso-path/build-path）
 │   ├── generated/                 # build 產物：preseed/、iso/、keys/（gitignored，只留 manifest/.gitkeep）
-│   ├── config/                    # Jinja2 模板——本來放在 roles/*/templates/，後來發現這個專案根本
+│   ├── template/                  # Jinja2 模板——本來放在 roles/*/templates/，後來發現這個專案根本
 │   │   │                          # 沒在用真正的 Ansible role 機制（role 不能有自己的 hosts:，這裡
 │   │   │                          # 全部靠明確路徑引用），搬過來跟其他 custom/ 底下的東西放一起
-│   │   ├── debian_preseed_iso/        # preseed.cfg.j2、debian.vmx.j2
 │   │   ├── wireguard_control_panel/   # VM 端 wg0.conf.j2（server）
 │   │   └── wireguard_agent/           # 控制端 wg0.conf.j2（peer，含 WSL2 跟原生 Windows 共用）
+│   ├── preseed_iso/                # Debian 無人值守安裝的完整來源：template/（preseed.cfg.j2、
+│   │   │                           # debian.vmx.j2，純粹是渲染/打包用的工作目錄，不對應 VM 上任何
+│   │   │                           # 路徑）、bootstrap/（裝機時烘焙進去、一次性的）跟 srv/（VM 的
+│   │   │                           # /srv 底下那些東西，工作目錄結構直接對齊最終 /srv 的結構）
+│   │   ├── template/                  # preseed.cfg.j2、debian.vmx.j2——不對應 VM 上任何路徑
+│   │   ├── bootstrap/                 # 對齊 VM 上 ~{{ vm_user }}/bootstrap/ 的結構
+│   │   └── srv/                       # 對齊 VM 上 /srv 的結構（srv/ansible/、srv/harbor/、srv/nginx/...）
 │   ├── scripts/
 │   │   ├── remaster-iso/debian.sh     # 重新封裝 ISO（注入檔案、改開機自動選單）
 │   │   ├── verify-iso/debian.sh       # 驗證官方未竄改 ISO
@@ -155,7 +161,7 @@ task clean         # 清掉 build 產物（keys 會額外二次確認）
 ├── inventory/
 │   ├── windows.ini                 # WinRM 連本機 Windows 用（WSL2 場景，透過 Enable-PSRemoting 開的 listener）
 │   └── group_vars/windows.yml      # windows group 的連線帳密，讀 custom/scripts/tasks/ansible/load_env 解析出來的 custom/.env
-├── group_vars/ host_vars/ roles/   # Ansible 官方骨架，目前皆為空，各自 .gitkeep 佔位（這個專案沒用到真正的 role 機制，見上方 custom/config/ 的說明）
+├── group_vars/ host_vars/ roles/   # Ansible 官方骨架，目前皆為空，各自 .gitkeep 佔位（這個專案沒用到真正的 role 機制，見上方 custom/template/ 的說明）
 ├── requirements.yml                # ansible-galaxy collections（community.crypto、ansible.posix、ansible.windows）
 └── Taskfile.yaml                   # 任務入口，include custom/scripts/tasks/go-task/ 底下的檔案
 ```
@@ -174,4 +180,4 @@ task clean         # 清掉 build 產物（keys 會額外二次確認）
 - `charlie` 跟 `root` 都沒有密碼；若 WireGuard 或 SSH 本身掛掉，除了 ESXi console（需要密碼，兩者都沒有）之外沒有救援路徑——這是刻意接受的 tradeoff，細節見 `CLAUDE.md`。`bootstrap-sudo` 是唯一的事後補救手段，且要在還能 SSH 進去時自己執行。
 
 ## 專案相關
-- ```custom/config/debian_preseed_iso/preseed.cfg.j2``` 渲染成 preseed.cfg，打包入 iso ，在使用者安裝 debian 的時候使debian-installer 讀取
+- ```custom/preseed_iso/template/preseed.cfg.j2``` 渲染成 preseed.cfg，打包入 iso ，在使用者安裝 debian 的時候使debian-installer 讀取

@@ -145,7 +145,7 @@
     - name: 渲染 WSL2 自己的 wg0.conf（Endpoint 直接填實際 IP，不再留空）
       become: true
       ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../custom/config/wireguard_agent/wg0.conf.j2"
+        src: "{{ playbook_dir }}/../../custom/template/wireguard_agent/wg0.conf.j2"
         dest: /etc/wireguard/wg0.conf
         mode: "0600"
       vars:
@@ -307,7 +307,7 @@
         - name: 寫 WireGuard for Windows 可以直接 Import tunnel(s) from file 的 .conf（跟 wg-quick 用的是同一種格式）
           when: should_write_conf
           ansible.windows.win_template:
-            src: "{{ playbook_dir }}/../../custom/config/wireguard_agent/wg0.conf.j2"
+            src: "{{ playbook_dir }}/../../custom/template/wireguard_agent/wg0.conf.j2"
             dest: "{{ windows_conf_path }}"
           vars:
             wireguard_private_key: "{{ (hostvars['localhost'].windows_peer_private_key_raw.content | b64decode).strip() }}"

@@ -18,9 +18,8 @@ set -euo pipefail
 # 東西（跟子行程執行、靠 $(...) 接最後一行輸出的做法不一樣，那種做法只要
 # 哪一行 echo 忘記送 stderr，就會把值弄錯）。
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=config.sh
-source "$SCRIPT_DIR/config.sh"
+# shellcheck source=/srv/ansible/config.sh
+source /srv/ansible/config.sh
 
 # 先宣告成空字串，純粹是給人看的文件（標示 harbor_setup 會設這個變數），
 # 不影響行為——跟 apply.sh 開頭那行一樣，重複宣告不會衝突，函式裡沒加

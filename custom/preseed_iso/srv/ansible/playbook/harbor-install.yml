@@ -9,7 +9,7 @@
 # preflight → cert → install → configure-proxy-cache 這條流程搬過來的，主要差異：
 #   - cert 那步整個拿掉：Harbor 自己完全不碰 TLS，只在 127.0.0.1 上講明文 HTTP
 #     （見下面限制 proxy service port 那段）。TLS 統一由獨立的 nginx 反代
-#     （nginx-proxy，見 custom/config/debian_preseed_iso/nginx_proxy/）集中終止
+#     （nginx-proxy，見 custom/preseed_iso/srv/nginx/）集中終止
 #     ——CA/leaf 憑證是控制節點裝機前用 community.crypto 簽好、隨 ISO注入到
 #     nginx-proxy 的暫存資料夾（不是這支 playbook 的暫存資料夾），這支完全不碰
 #     憑證檔案，也不用把 CA 灌進系統信任庫（那是 nginx-proxy-install.yml 的事）。
@@ -26,8 +26,9 @@
 # systemctl --user（容器逃逸拿不到主機 root），對應 lg-laravel 專案
 # scripts/bin/rootless-podman.sh 的 rootless_user_run，這裡用 become_user +
 # environment 做一樣的事。rootless 使用者設置那段跟 nginx-proxy-install.yml
-# 共用同一份 /opt/bootstrap/common/rootless_podman_user_setup.yml（原始檔是
-# custom/scripts/tasks/ansible/rootless_podman_user/setup.yml）。
+# 共用同一份 /srv/ansible/playbook/rootless_podman_user_setup.yml（原始檔是
+# custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著
+# 整棵 srv/ 樹一起搬過去，不用額外的複製 task）。
 
 - name: 在 VM 上把 Harbor pull-through cache 鏡像站架起來（podman-compose，rootless）
   hosts: localhost
@@ -35,37 +36,37 @@
   gather_facts: false
 
   vars_files:
-    - /opt/bootstrap/harbor/harbor_runtime_vars.yml
+    - /srv/ansible/playbook/harbor_runtime_vars.yml
 
   vars:
-    harbor_staging_dir: /opt/bootstrap/harbor # late_command 複製進來的暫存位置（harbor 使用者裝機當下還不存在，late_command 沒辦法直接 chown 給它）
+    nginx_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 harbor_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行 URL
     harbor_installer_cache: /var/cache/harbor-installer
     harbor_tgz_name: "harbor-offline-installer-{{ harbor_version }}.tgz"
     harbor_tgz_cached_path: "{{ harbor_installer_cache }}/{{ harbor_tgz_name }}"
     # proxy project <-> 上游對照：project 名稱、Harbor registry endpoint 名稱、
     # endpoint 類型、上游 URL、（給 bootstrap-services 寫 registries.conf.d mirror
-    # 用的）上游 registry hostname。原始內容是 custom/config/debian_preseed_iso/harbor/proxy_map.json
-    # 這一份靜態檔案，裝機前隨 ISO 注入到跟 harbor.yml/harbor-install.yml 同一個
-    # 暫存資料夾（{{ harbor_staging_dir }}）——這份資料是 Harbor 自己的東西，不是
-    # harbor/nginx-proxy 兩邊共用的，所以沒有放進 /opt/bootstrap/common/。
+    # 用的）上游 registry hostname。原始內容是 custom/preseed_iso/srv/harbor/proxy_map.json
+    # 這一份靜態檔案，裝機前隨 ISO 直接注入到 {{ harbor_home }}（late_command
+    # 就直接放進最終位置，不經過另一個暫存資料夾）——這份資料是 Harbor 自己
+    # 的東西，所以放在 harbor_home 底下，不是放進 /srv/ansible/playbook/。
     # bootstrap-services（Go 程式）不管選哪個分支（本機裝還是接外部既有的）都要
-    # 讀同一份來寫 registries.conf.d mirror，所以這支 playbook 最後清暫存檔案時
-    # 特意不動這一份（見下面「清掉這支 playbook 自己用過的暫存檔案」那個 task）。
-    # 這支 playbook 跟 bootstrap-services 都讀同一份，不是各自維護一份容易
-    # 兜不起來的複本（lg-laravel 專案 PROXY_MAP 分散在三處維護，就是這裡刻意要
-    # 避開的問題）。
-    proxy_map: "{{ lookup('file', harbor_staging_dir + '/proxy_map.json') | from_json }}"
+    # 讀同一份來寫 registries.conf.d mirror，所以這支 playbook 完全不去動這個
+    # 檔案（不在下面「清掉這支 playbook 自己用過的暫存檔案」的範圍內）。這支
+    # playbook 跟 bootstrap-services 都讀同一份，不是各自維護一份容易兜不起來
+    # 的複本（lg-laravel 專案 PROXY_MAP 分散在三處維護，就是這裡刻意要避開的
+    # 問題）。
+    proxy_map: "{{ lookup('file', harbor_home + '/proxy_map.json') | from_json }}"
     harbor_project_quota_bytes: 16106127360 # 15GiB；8 個 proxy project × 15GiB = 120GiB，留約 30GB 給 postgres/redis/trivy + 邊際（vm_disk_harbor_gb 整顆抓 150GB）
     robot_name: mirror-puller
     harbor_api_base: "http://127.0.0.1:{{ harbor_internal_http_port }}/api/v2.0" # 本機直連明文 HTTP，不透過 nginx-proxy——這支 playbook 本來就跑在 VM 自己身上，不需要繞一圈去過 TLS
-    harbor_secrets_dir: /opt/harbor/secrets # 執行期才生得出來的機密（robot secret）存這裡，root-only 可讀，對照這個專案 custom/.env 明文存機密的風格
+    harbor_secrets_dir: /srv/harbor/secrets # 執行期才生得出來的機密（robot secret）存這裡，root-only 可讀，對照這個專案 custom/.env 明文存機密的風格
 
   tasks:
     # ────────────────────────── rootless 使用者 ──────────────────────────
 
     - name: 建立 harbor 這個 rootless 專屬系統使用者
       ansible.builtin.include_tasks:
-        file: /opt/bootstrap/common/rootless_podman_user_setup.yml # 原始檔是 custom/scripts/tasks/ansible/rootless_podman_user/setup.yml，裝機前由 control-panel/debian.yml 複製進 ISO——跟 nginx-proxy-install.yml 共用同一份
+        file: /srv/ansible/playbook/rootless_podman_user_setup.yml # 原始檔是 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著整棵 srv/ 樹裝機前由 control-panel/debian.yml 複製進 ISO——跟 nginx-proxy-install.yml 共用同一份
       vars:
         rootless_user_name: "{{ harbor_user }}"
         rootless_service_dirs:
@@ -73,29 +74,19 @@
           - "{{ vm_harbor_mount_path }}"
           - "{{ harbor_installer_cache }}"
 
-    # ────────────────────────── 設定檔就位 ──────────────────────────
-    # harbor.yml 已經由控制節點渲染好、隨 ISO 注入到 {{ harbor_staging_dir }}，
-    # 這裡要搬到 harbor 使用者讀得到的最終位置——不是隨便選的路徑，goharbor/prepare
-    # 這個容器是靠 -v {{ harbor_home }}:/input:z 掛進去讀 harbor.yml 的（見下面
-    # 「跑 goharbor/prepare」那個 task），檔案一定要放在 harbor_home 底下，
-    # prepare 才找得到。
-    #
-    # 用 mv（ansible.builtin.command）不是 ansible.builtin.copy：harbor.yml
-    # 裡面有 harbor_admin_password/database.password 明文密碼，copy 的話會讓
-    # 同一份密碼在磁碟上同時存在兩份（暫存那份要等 playbook 最後「收尾」那段
-    # 才會清掉），mv 讓暫存那份當場就消失，密碼不會有重複存在的空窗期。沒有
-    # 憑證要搬——Harbor 自己完全不碰 TLS（見下面限制 proxy service port 那段），
-    # 憑證是 nginx-proxy 的事，不是這支 playbook 的事。
+    # ────────────────────────── 設定檔權限收緊 ──────────────────────────
+    # harbor.yml 已經由控制節點渲染好、隨 ISO 直接注入到 {{ harbor_home }}（不是
+    # 先放另一個暫存資料夾、裝好再搬——goharbor/prepare 這個容器是靠
+    # -v {{ harbor_home }}:/input:z 掛進去讀 harbor.yml 的，見下面「跑
+    # goharbor/prepare」那個 task，檔案本來就要放在 harbor_home 底下才找得到）。
+    # 擁有者已經由上面「建立 harbor 這個 rootless 專屬系統使用者」那步的
+    # recurse: true chown 處理掉了，這裡只需要把這一份的權限收得比同目錄
+    # 其他檔案更嚴格一點——裡面有 harbor_admin_password/database.password
+    # 明文密碼。
 
-    - name: 搬 harbor.yml 到 {{ harbor_home }}（mv，不留暫存副本——這個檔案裡有明文密碼）
-      ansible.builtin.command: mv {{ harbor_staging_dir }}/harbor.yml {{ harbor_home }}/harbor.yml
-      changed_when: true
-
-    - name: 把搬過去的 harbor.yml 擁有者/權限改成 harbor 使用者
+    - name: 收緊 harbor.yml 的權限（裡面有明文密碼，不該跟目錄裡其他檔案一樣寬）
       ansible.builtin.file:
         path: "{{ harbor_home }}/harbor.yml"
-        owner: "{{ harbor_user }}"
-        group: "{{ harbor_user }}"
         mode: "0640"
 
     # ────────────────────────── 下載／校驗 offline installer ──────────────────────────
@@ -434,9 +425,9 @@
 
     # ────────────────────────── 收尾 ──────────────────────────
 
-    - name: 清掉這支 playbook 自己用過的暫存檔案（harbor.yml 已經用 mv 搬走、不在這裡了；這兩個留著沒用）——不是整個 harbor_staging_dir，proxy_map.json 也放在這個資料夾，但那個檔案是 bootstrap-services 自己後續還要讀的（寫 registries.conf.d mirror 用），不屬於這支 playbook 可以清掉的範圍
+    - name: 清掉這支 playbook 自己用過的一次性檔案（harbor_runtime_vars.yml 裡有明文密碼，用完就刪；harbor-install.yml 自己也是一次性的，裝完就沒用了）
       ansible.builtin.file:
-        path: "{{ harbor_staging_dir }}/{{ item }}"
+        path: "/srv/ansible/playbook/{{ item }}"
         state: absent
       loop:
         - harbor_runtime_vars.yml

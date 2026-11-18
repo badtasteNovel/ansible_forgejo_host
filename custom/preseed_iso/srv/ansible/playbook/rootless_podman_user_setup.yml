@@ -64,13 +64,14 @@
       # 自己的說明），不是每個使用者自己的 ~/.config/containers/auth.json。
       REGISTRY_AUTH_FILE: /etc/containers/mirror-auth.json
 
-- name: 服務目錄（chown 給 {{ rootless_user_name }}）
+- name: 服務目錄（chown 給 {{ rootless_user_name }}，遞迴——late_command 裝機當下已經把設定檔/憑證這些東西直接放進最終位置了（不是先放暫存資料夾、裝好再搬），這些目錄第一次被這個 task 碰到的時候裡面可能已經有 root 擁有的檔案，recurse: true 才能把裡面現有的東西一起改成這個使用者）
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
     owner: "{{ rootless_user_name }}"
     group: "{{ rootless_user_name }}"
     mode: "0750"
+    recurse: true
   loop: "{{ rootless_service_dirs }}"
 
 - name: 驗證 rootless podman 能動（確保後面的步驟不會卡在 linger/subuid 沒生效）
