@@ -47,6 +47,19 @@ tasks:
         fi
         preseed_iso_path="$(pwd)/custom/generated/iso/${vm_name}/${vm_name}-preseed.iso"
 
+        # Harbor 的 admin/db 密碼是使用者自己在 .env 裡決定的值（不是自動產生的
+        # 隨機字串）——跟 HYPERVISOR_PASSWORD/WINDOWS_PASSWORD 一樣的慣例，這個
+        # 專案裡 .env 管的是「人自己決定、人自己記得」的密碼，不是程式產生的。
+        # 這裡無條件檢查，不像以前只有表單選了要裝 Harbor 才檢查——build:debian
+        # 表單已經不問「要不要裝 Harbor」這題了（這個決定延後到 VM 開機後
+        # bootstrap-services 才問，見 playbook/control-panel/debian.yml 開頭的
+        # 說明），但 harbor.yml 這些檔案不管最後用不用得到都會無條件渲染進 ISO，
+        # 所以這兩個密碼現在是每次 build 都要填好的必要值，不是選用的。
+        if [ -z "${HARBOR_ADMIN_PASSWORD:-}" ] || [ -z "${HARBOR_DB_PASSWORD:-}" ]; then
+          echo "錯誤：custom/.env 要先填好 HARBOR_ADMIN_PASSWORD / HARBOR_DB_PASSWORD（見 custom/.env.example）——VM 開機後 bootstrap-services 選了要在本機裝 Harbor 才會真的用到，但這兩個值現在無條件渲染進 ISO，每次 build 都要先填好" >&2
+          exit 1
+        fi
+
         # 這台 VM 一定會被設成 WireGuard server，這不是選用功能——這裡只問
         # 要新增幾個匿名的 peer 位置（金鑰先產生好，還沒被任何機器用）。
         # 「把目前這台機器認領成 peer」刻意不在這裡問、也不在這裡做——認領
@@ -92,10 +105,16 @@ tasks:
           fi
         fi
 
+        # HARBOR_ADMIN_PASSWORD/HARBOR_DB_PASSWORD 不透過 --extra-vars 傳——那樣
+        # 密碼會整個攤在指令列上，這台機器上任何人跑 ps aux/看 /proc/<pid>/cmdline
+        # 都讀得到。上面 `set -a; source custom/.env; set +a` 已經把整份 .env
+        # 匯出成真正的環境變數了，control-panel/debian.yml 直接用
+        # lookup('env', ...) 讀，跟 hypervisor_password 的做法一致。
         ansible-playbook "$build_path" \
           --extra-vars "iso_path=${iso_path}" \
           --extra-vars "peer_slot_count=${peer_slot_count}" \
           --extra-vars "vm_name=${vm_name}"
 
         echo "" >&2
+        echo "VM 開機、SSH 進去之後，跑 sudo ~/bootstrap/bootstrap-services——互動決定要不要在本機裝 Harbor（還是接一個已經存在的外部 Harbor），裝好/接上之後才會接著裝 nginx-proxy。" >&2
         echo "要把這台機器加進 WireGuard、成為 peer，VM 開機、查到 IP 之後，請跑：task add-peer" >&2

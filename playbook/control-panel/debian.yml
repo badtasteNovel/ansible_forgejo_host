@@ -45,6 +45,45 @@
     vm_data_mount_path: "/data"
     vm_ssh_port: 52222 # 不用預設 22，躲開公開掃描，也避開跟其他服務（例如之後可能裝的 Kubernetes/Cilium）的 port 衝突
 
+    # Harbor 是不是要裝、裝本機的還是接外部既有的，不再是控制節點 build 時的
+    # 決定——build:debian 表單不問這題了，改成 VM 開機後使用者自己手動跑
+    # bootstrap-services（見 custom/scripts/bootstrap-services/）互動決定。
+    # 這裡因此不再有 install_harbor 這個變數：CA/leaf 憑證/harbor.yml/
+    # harbor-install.yml 這些 build 時就能確定的東西全部無條件烘焙進 ISO，
+    # 裝不裝、用哪個 Harbor 是開機後才知道的事，不能也不需要在這裡擋。
+    # 第三顆磁碟（vm_disk_harbor_gb）同理也無條件建立——thin provisioning
+    # 幾乎不佔實際空間，不需要為了「可能用不到」去跟開機後才知道的決定搶
+    # 時機做條件判斷。
+    vm_disk_harbor_gb: 150 # 第三顆碟，無條件建立：8 個 proxy project × 15GiB quota + postgres/redis/trivy + 邊際
+    vm_harbor_mount_path: "/var/lib/harbor" # Harbor 全部持久狀態（registry blob 快取本體/postgres/redis/trivy），FHS 慣例路徑，不用官方預設的 /data（那個名字跟這個專案自己的 vm_data_mount_path 太像，容易搞混）
+    harbor_user: harbor # rootless 專屬系統使用者，容器逃逸拿不到主機 root
+    harbor_home: /opt/harbor # bundle 目錄（docker-compose.yml、harbor.yml、certs/、common/）
+    harbor_version: v2.15.4 # 下次要裝成什麼版本；跟 harbor_cfg_version 的 x.y.0 對應關係見 harbor.yml.j2 自己的註解
+    harbor_cfg_version: "2.15.0"
+    # 跟 hypervisor_password 同一個做法：直接 lookup('env', ...) 讀，不透過
+    # --extra-vars 傳——那樣密碼會整個攤在指令列上，ps aux/讀 /proc/<pid>/cmdline
+    # 就看得到，這台機器上任何人都讀得到；build-vm.yaml 跑 ansible-playbook 之前
+    # 已經 source custom/.env 把整份 .env 匯出成真正的環境變數了，這裡才讀得到。
+    harbor_admin_password: "{{ lookup('env', 'HARBOR_ADMIN_PASSWORD') }}" # 只有 bootstrap-services 開機後選了要在本機裝 Harbor 才會真的用到，但 harbor.yml 無條件渲染，所以這兩個密碼現在是每次 build 都要填好的必要值
+    harbor_db_password: "{{ lookup('env', 'HARBOR_DB_PASSWORD') }}"
+    # meta.json 是這個 repo 的部署設定（見 meta.schema.json），跟 custom/.env 不一樣
+    # ——.env 放的是「人決定、不想進版控」的密碼；meta.json 放的是「可以跟著 repo
+    # 一起 commit」的設定值（port、image 這種非機密的部署參數）。
+    harbor_meta: "{{ lookup('file', playbook_dir + '/../../meta.json') | from_json }}"
+    # 這個 port 現在是 Harbor 自己在 127.0.0.1 上講明文 HTTP 的內部埠，不是對外埠
+    # ——TLS 統一由 nginx-proxy 集中終止，client 端實際連線用的是 nginx_proxy_https_port
+    # + harbor_hostname，不是這個值。欄位名稱沿用 meta.json 的 registry.port，
+    # 沒有另外改 schema，只是意義從「Harbor 對外埠」變成「Harbor 內部埠」。
+    harbor_internal_http_port: "{{ harbor_meta.registry.port }}"
+    harbor_hostname: "harbor.{{ vm_name }}.internal" # client 端要連 Harbor 時打的名字（nginx-proxy 後面的 vhost）；沒有真正的 DNS，peer 端要自己在 hosts 檔案加一行指到 wireguard_vm_address
+
+    # nginx-proxy 是跟 WireGuard 同等級的強制功能（每台 VM 都裝）：獨立用 podman
+    # 跑一個 nginx，當整台 VM 對外的唯一入口，TLS 在這裡集中終止，以後每多一個
+    # 服務只是在它後面多加一個 vhost，不用再開新的 ufw 洞。
+    nginx_proxy_user: nginx-proxy # rootless 專屬系統使用者，跟 harbor_user 彼此隔離
+    nginx_proxy_home: /opt/nginx-proxy
+    nginx_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠（單一埠 + hostname 分流，不是一個服務一個埠）
+
     wireguard_vm_address: "10.105.0.1"
     wireguard_peer_subnet: "10.105.0.0/24" # charlie 的 authorized_keys 用這個限制 from=，只接受從任一合法 WireGuard peer 連進來
     wireguard_listen_port: 51820
@@ -73,6 +112,23 @@
     datastore_vmx_path: "{{ datastore_vm_dir }}/{{ vm_name }}.vmx"
     datastore_system_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}.vmdk"
     datastore_data_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-data.vmdk"
+    datastore_harbor_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-harbor.vmdk"
+
+    # CA/leaf 憑證獨立放在 custom/generated/ca/（不是 custom/generated/keys/
+    # 底下）：跟 SSH/WireGuard 金鑰性質不同，分開分類比較清楚。整個
+    # custom/generated/ca/ 都不進版控（見 custom/generated/ca/.gitignore）——
+    # 這些東西已經在本機磁碟上持續存在（community.crypto 的模組本身就是「已
+    # 存在則不重建」），不需要靠 git 來保存。底下再分 public/（憑證本體）跟
+    # private/（私鑰/CSR）純粹是檔案組織上的習慣，私鑰跟公開憑證分開放、
+    # 不混在同一層，跟進不進版控無關。
+    #
+    # 這個 CA 現在屬於 nginx-proxy（不是 harbor 專屬），是每台 VM 都會有的一套
+    # ——以後每多一個服務要掛 HTTPS vhost，都是用同一個 CA 簽自己的 leaf 憑證，
+    # 所以路徑不叫 ca/harbor/，叫 ca/{{ vm_name }}（每台 VM 一個 CA，底下可能
+    # 簽出好幾份不同服務的 leaf 憑證）。
+    proxy_ca_dir: "{{ generated_dir }}/ca/{{ vm_name }}"
+    proxy_ca_private_dir: "{{ proxy_ca_dir }}/private"
+    proxy_ca_public_dir: "{{ proxy_ca_dir }}/public"
 
     hypervisor_hostname: "{{ lookup('env', 'HYPERVISOR_HOSTNAME') }}"
     hypervisor_username: "{{ lookup('env', 'HYPERVISOR_USERNAME') }}"
@@ -113,6 +169,15 @@
         - "{{ keys_dir }}/known-hosts/{{ vm_name }}" # ssh_host_key_path 的上層目錄
         - "{{ preseed_output_dir }}"
         - "{{ iso_output_dir }}"
+
+    - name: 確保 custom/generated/ca/{{ vm_name }}/{private,public}/ 存在（nginx-proxy 的 CA，每台 VM 都要）
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop:
+        - "{{ proxy_ca_private_dir }}"
+        - "{{ proxy_ca_public_dir }}"
 
     - name: 產生 SSH 金鑰對（charlie 登入用，若已存在則不重建）
       community.crypto.openssh_keypair:
@@ -207,6 +272,158 @@
         dest: "{{ preseed_output_dir }}/bootstrap-firewall.sh"
         mode: "0700"
 
+    - name: 複製共用的 rootless podman 使用者設置 task fragment 進 ISO 注入資料夾（nginx-proxy-install.yml 跟 harbor-install.yml 在 VM 上都要 include 這份，原始檔見 custom/scripts/tasks/ansible/rootless_podman_user/setup.yml）
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/rootless_podman_user/setup.yml"
+        dest: "{{ preseed_output_dir }}/rootless_podman_user_setup.yml"
+        mode: "0600"
+
+    - name: "nginx-proxy 是強制功能：CA 產生、設定檔渲染、安裝 playbook 複製進 ISO 注入資料夾"
+      block:
+        - name: 產生 nginx-proxy 本地 CA 私鑰（若已存在則不重建——留在控制節點，不會被複製進 VM，VM 只拿得到 CA 憑證本身）
+          community.crypto.openssl_privatekey:
+            path: "{{ proxy_ca_private_dir }}/ca.key"
+            type: RSA
+            size: 4096
+
+        - name: 產生 nginx-proxy CA 的 CSR（CA:TRUE，自簽用；CSR 不含私鑰，但沒有獨立用途，一樣放 private/ 跟對應的私鑰放一起）
+          community.crypto.openssl_csr:
+            path: "{{ proxy_ca_private_dir }}/ca.csr"
+            privatekey_path: "{{ proxy_ca_private_dir }}/ca.key"
+            common_name: "{{ vm_name }} nginx-proxy Local CA"
+            organization_name: "{{ vm_name }}"
+            basic_constraints:
+              - "CA:TRUE"
+            basic_constraints_critical: true
+            key_usage:
+              - keyCertSign
+              - cRLSign
+            key_usage_critical: true
+
+        - name: 自簽 nginx-proxy CA 憑證（10 年，若已存在則不重建）
+          community.crypto.x509_certificate:
+            path: "{{ proxy_ca_public_dir }}/ca.crt"
+            privatekey_path: "{{ proxy_ca_private_dir }}/ca.key"
+            csr_path: "{{ proxy_ca_private_dir }}/ca.csr"
+            provider: selfsigned
+            selfsigned_not_after: "+3650d"
+
+        - name: 把 CA 憑證複製進 ISO 注入資料夾（CA 私鑰刻意不複製——VM 不需要用它簽任何東西，留在控制節點就好，以後要幫新服務簽 leaf 憑證都在控制節點做）
+          ansible.builtin.copy:
+            src: "{{ proxy_ca_public_dir }}/ca.crt"
+            dest: "{{ preseed_output_dir }}/nginx-proxy-ca.crt"
+            remote_src: true
+            mode: "0644"
+
+        - name: 渲染 nginx_proxy_runtime_vars.yml，放進 ISO 注入資料夾（nginx-proxy-install.yml 要用的少數幾個值）
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/nginx_proxy/nginx_proxy_runtime_vars.yml.j2"
+            dest: "{{ preseed_output_dir }}/nginx_proxy_runtime_vars.yml"
+            mode: "0600"
+
+        - name: 把 nginx-proxy-install.yml（VM 開機後背景執行的 Ansible playbook，不是樣板、原封不動複製）放進 ISO 注入資料夾
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/nginx_proxy/nginx-proxy-install.yml"
+            dest: "{{ preseed_output_dir }}/nginx-proxy-install.yml"
+            mode: "0600"
+
+    - name: "Harbor 相關檔案一律無條件烘焙進 ISO：leaf 憑證/vhost conf/設定檔產生、渲染、安裝 playbook 複製進 ISO 注入資料夾（裝不裝是 bootstrap-services 開機後才決定的事，不是這裡）"
+      block:
+        - name: 產生 Harbor leaf 私鑰（若已存在則不重建）
+          community.crypto.openssl_privatekey:
+            path: "{{ proxy_ca_private_dir }}/harbor.key"
+            type: RSA
+            size: 4096
+
+        - name: 產生 Harbor leaf 憑證的 CSR（CN/SAN 是 harbor_hostname，不是 IP——nginx-proxy 用 hostname 分流，TLS 驗證看的是這個名字，不是 Harbor 自己的位址）
+          community.crypto.openssl_csr:
+            path: "{{ proxy_ca_private_dir }}/harbor.csr"
+            privatekey_path: "{{ proxy_ca_private_dir }}/harbor.key"
+            common_name: "{{ harbor_hostname }}"
+            organization_name: "{{ vm_name }}"
+            subject_alt_name:
+              - "DNS:{{ harbor_hostname }}"
+            key_usage:
+              - digitalSignature
+              - keyEncipherment
+            key_usage_critical: true
+            extended_key_usage:
+              - serverAuth
+
+        - name: 用 nginx-proxy CA 簽發 Harbor leaf 憑證（825 天，每次重跑都重簽——跟 lg-laravel 那套的慣例一致：換 leaf 不換 CA）
+          community.crypto.x509_certificate:
+            path: "{{ proxy_ca_public_dir }}/harbor.crt"
+            csr_path: "{{ proxy_ca_private_dir }}/harbor.csr"
+            provider: ownca
+            ownca_path: "{{ proxy_ca_public_dir }}/ca.crt"
+            ownca_privatekey_path: "{{ proxy_ca_private_dir }}/ca.key"
+            ownca_not_after: "+825d"
+
+        - name: 把 Harbor leaf 憑證/私鑰複製進 ISO 注入資料夾（這兩個檔案最終會進 /opt/bootstrap/nginx/certs/，不是 /opt/bootstrap/harbor/——Harbor 自己不碰 TLS）
+          ansible.builtin.copy:
+            src: "{{ item.src }}"
+            dest: "{{ preseed_output_dir }}/{{ item.dest }}"
+            remote_src: true
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "{{ proxy_ca_public_dir }}/harbor.crt", dest: harbor.crt, mode: "0644" }
+            - { src: "{{ proxy_ca_private_dir }}/harbor.key", dest: harbor.key, mode: "0640" }
+
+        - name: 渲染 harbor.conf（nginx-proxy 後面 Harbor 的 vhost 設定），放進 ISO 注入資料夾
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/harbor/harbor.conf.j2"
+            dest: "{{ preseed_output_dir }}/harbor.conf"
+            mode: "0644"
+
+        - name: 渲染 harbor.yml，放進 ISO 注入資料夾（跟 wg0.conf/preseed.cfg 同一套做法——密碼/位址這些值裝機前在控制節點就全部知道，不用等 VM 開機後才現場組設定檔）
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/harbor/harbor.yml.j2"
+            dest: "{{ preseed_output_dir }}/harbor.yml"
+            mode: "0640"
+
+        - name: 渲染 harbor_runtime_vars.yml，放進 ISO 注入資料夾（VM 上那支 harbor-install.yml playbook 要用的少數幾個值——admin 密碼、port 這種——不用回頭解析 harbor.yml 才拿得到）
+          ansible.builtin.template:
+            src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/harbor/harbor_runtime_vars.yml.j2"
+            dest: "{{ preseed_output_dir }}/harbor_runtime_vars.yml"
+            mode: "0600"
+
+        - name: 把 harbor-install.yml（VM 開機後背景執行的 Ansible playbook，不是樣板、原封不動複製）放進 ISO 注入資料夾
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/harbor/harbor-install.yml"
+            dest: "{{ preseed_output_dir }}/harbor-install.yml"
+            mode: "0600"
+
+        - name: 把 proxy_map.json（上游 registry 對照表，harbor-install.yml 跟 bootstrap-services 都要讀同一份）放進 ISO 注入資料夾
+          ansible.builtin.copy:
+            src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/harbor/proxy_map.json"
+            dest: "{{ preseed_output_dir }}/proxy_map.json"
+            mode: "0644"
+
+    - name: 把 ansible-navigator 用的 execution-environment.yml / ansible-navigator.yml 放進 ISO 注入資料夾（static 檔案，不是樣板——兩支 playbook 用哪個 EE 執行、掛哪些 host 路徑，裝機前就固定了，不用等開機後才決定）
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/ansible_ee/{{ item }}"
+        dest: "{{ preseed_output_dir }}/{{ item }}"
+        mode: "0644"
+      loop:
+        - execution-environment.yml
+        - ansible-navigator.yml
+
+    - name: 編譯 bootstrap-services（VM 開機後使用者自己手動執行的互動表單，見 custom/scripts/bootstrap-services/main.go 開頭說明；go run 不適用，道理跟 bootstrap-sudo 一樣——這支要跑在 VM 上，VM 不會有 Go 工具鏈）
+      ansible.builtin.command:
+        cmd: go build -o {{ preseed_output_dir }}/bootstrap-services .
+        chdir: "{{ playbook_dir }}/../../custom/scripts/bootstrap-services"
+      environment:
+        CGO_ENABLED: "0"
+        GOOS: linux
+        GOARCH: amd64
+      changed_when: true
+
+    - name: 把 bootstrap-services 表單問完之後真正做事的那組 shell script（config.sh/apply.sh/harbor.sh/nginx.sh，不是樣板、原封不動複製）整個資料夾放進 ISO 注入資料夾——不是逐檔複製，VM 上最終也是一整個 services/ 子目錄，這裡直接對齊同一個結構，不用額外的 mkdir/cp/chmod 一行行寫
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/bootstrap_services/"
+        dest: "{{ preseed_output_dir }}/services/"
+        mode: "0700"
+
     - name: 渲染 preseed.cfg
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom/config/debian_preseed_iso/preseed.cfg.j2"
@@ -283,6 +500,16 @@
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
 
+    - name: 用 vmkfstools 建立 Harbor 專屬資料碟（無條件建立，見上面 vm_disk_harbor_gb 的說明）
+      ansible.builtin.command:
+        cmd: >
+          sshpass -e ssh {{ ssh_opts }}
+          {{ hypervisor_username }}@{{ hypervisor_hostname }}
+          vmkfstools -c {{ vm_disk_harbor_gb }}G -d thin {{ datastore_harbor_vmdk_path }}
+      environment:
+        SSHPASS: "{{ hypervisor_password }}"
+      changed_when: true
+
     - name: 印出後續手動步驟需要的資訊
       ansible.builtin.debug:
         msg:
@@ -292,3 +519,9 @@
           - "3. 開機、preseed 無人值守安裝跑完後，自己查一下 VM 的 LAN IP（唯一用途：等一下 task add-peer 要用）"
           - "4. 跑 task add-peer——把目前這台機器加進 WireGuard、接通隧道、順便把 known_hosts 跟 SSH 私鑰準備好（VM 的 LAN IP 就是這時候用）"
           - "5. 接通之後，SSH 連線固定走 WireGuard 位址 {{ wireguard_vm_address }}，不是 VM 的 LAN IP——連線細節看 task add-peer 跑完印出的提示"
+
+    - name: 印出 bootstrap-services 的後續資訊
+      ansible.builtin.debug:
+        msg:
+          - "6. VM 開機、SSH 進去之後，跑 sudo ~/bootstrap/bootstrap-services——互動問要不要在本機裝 Harbor（還是接一個已經存在的外部 Harbor），裝好/接上之後才會接著裝 nginx-proxy（nginx-proxy 本身是強制功能，但要等這支程式把 Harbor 這塊決定完才會真的執行安裝，這樣 nginx-proxy 自己要拉的 image 才吃得到 Harbor 的 pull-through cache）。"
+          - "   選了在本機裝 Harbor 的話，裝好之後走 https://{{ harbor_hostname }}:{{ nginx_proxy_https_port }}（只能從 WireGuard 隧道連），admin 密碼就是 custom/.env 的 HARBOR_ADMIN_PASSWORD；peer 端自己的 hosts 檔案要先加一行：{{ wireguard_vm_address }} {{ harbor_hostname }}。"

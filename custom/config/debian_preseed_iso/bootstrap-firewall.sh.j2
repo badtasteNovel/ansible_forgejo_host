@@ -38,12 +38,23 @@ fi
 #     用 WireGuard 子網本身去限制，否則自己把隧道堵死）；
 # (2) SSH port——只准 WireGuard peer 子網，跟 sshd 自己的 ListenAddress
 #     鎖定是同一個不變量，ufw 只是再加一層；
-# (3) chrony 的 123/udp——同樣只准 WireGuard peer 子網。
+# (3) chrony 的 123/udp——同樣只准 WireGuard peer 子網；
+# (4) nginx-proxy 的對外埠——整台 VM 唯一的 HTTP(S) 入口，不管後面實際代理
+#     了哪些服務（Harbor 或以後加的任何東西），只需要開這一個洞，新增服務
+#     不用回來改這支腳本。來源刻意放行兩個網段，不是只有 WireGuard 子網：
+#     - {{ wireguard_peer_subnet }}：已經加入 WireGuard 的 peer（目前只有
+#       「agent」角色能加入 control-panel，見專案說明）。
+#     - {{ lan_subnet }}：這台 VM 以後要當 k3s host 用時，其他 server 通常
+#       會跟它在同一個實體 LAN 網段，不一定會透過 WireGuard 連——目前還沒有
+#       設計 agent-to-agent 或 server mesh 的連線方式，直接放行同網段是現階段
+#       最簡單可行的做法。
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow from {{ lan_subnet }} to any port {{ wireguard_listen_port }} proto udp
 ufw allow from {{ wireguard_peer_subnet }} to any port {{ vm_ssh_port }} proto tcp
 ufw allow from {{ wireguard_peer_subnet }} to any port 123 proto udp
+ufw allow from {{ wireguard_peer_subnet }} to any port {{ nginx_proxy_https_port }} proto tcp
+ufw allow from {{ lan_subnet }} to any port {{ nginx_proxy_https_port }} proto tcp
 ufw --force enable
 
 echo "ufw 規則已套用："

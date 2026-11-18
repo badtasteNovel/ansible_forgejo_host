@@ -1,0 +1,60 @@
+# VM 上用 ansible-navigator 執行 harbor-install.yml / nginx-proxy-install.yml
+# 用的 Execution Environment 定義——這兩支 playbook 現在不再用裸的
+# ansible-playbook 直接跑，改成跑在這個容器化的 Ansible 執行環境裡（見
+# ansible-navigator.yml 的設定），目的是集中管理這台 VM 上所有跟 podman
+# 相關的套件/image：裝了什麼 Ansible 相關工具、跑這些 playbook 會用到哪些
+# container image，都在這一份檔案裡找得到，不用去每個 *-install.yml 裡面翻。
+#
+# base_image 選 quay.io/ansible/creator-ee——官方現成的 Execution Environment
+# 映像，已經包好 ansible-core（不需要額外裝 python 套件），這支專案的 VM-side
+# playbook 只用 ansible.builtin.* 模組，沒有用到任何額外 collection，所以
+# dependencies 幾乎是空的，只在 additional_build_steps 裡補 podman——
+# harbor-install.yml/nginx-proxy-install.yml 的 task 要在容器裡面直接呼叫
+# podman 指令。這裡裝的是 EE 自己的 podman 二進位檔（不是把 VM 主機的
+# podman 執行檔掛進容器——不同基底映像的共享函式庫版本不一定相容，直接
+# 掛執行檔風險更高），實際操作的卻是 VM 主機上真正的狀態：ansible-navigator.yml
+# 把 /etc、/home、/run、/var/lib、/var/cache、/opt 這些路徑原封不動掛進容器
+# （--privileged --pid=host），EE 自己的 podman/useradd/systemctl 寫的都是
+# 掛進來的這些真實路徑，systemctl 是透過掛進來的 /run/systemd socket 直接
+# 跟 VM 主機的 systemd 講話（socket-based IPC，不依賴執行檔本身的函式庫
+# 相容性，这塊相對穩）；rootless podman 的 overlay 儲存層（~/.local/share/containers）
+# 由這個 EE 容器裡的 podman 直接讀寫掛進來的同一份目錄——這塊有沒有 UID/GID
+# 對應上的問題，沒有實機驗證過，是這份檔案目前最大的未知風險，跟專案其他
+# 「依通用文件知識寫成、沒有實機驗證過」的部分性質一樣；如果實測發現行不通，
+# 退路是把 harbor-install.yml/nginx-proxy-install.yml 改回裸的 ansible-playbook
+# 直接在 VM 主機上跑，不透過這個 EE。
+version: 3
+
+images:
+  base_image:
+    name: quay.io/ansible/creator-ee:latest
+
+dependencies:
+  galaxy: null # 不需要任何額外 collection，harbor-install.yml/nginx-proxy-install.yml 只用 ansible.builtin.*
+  python: null
+  system: null
+
+additional_build_steps:
+  append_base:
+    - RUN microdnf install -y podman shadow-utils || (apt-get update && apt-get install -y podman passwd)
+
+# ────────────────────────── images_used（這個專案自己加的欄位，不是 ansible-builder
+# 原生 schema 的一部分，純粹當集中記錄用——如果哪天真的跑 ansible-builder build
+# 這份檔案時被嚴格 schema 擋下來，把這整段刪掉即可，不影響上面真正會被
+# ansible-builder 讀的欄位）──────────────────────────
+images_used:
+  - service: harbor
+    images:
+      - goharbor/prepare:v2.15.4
+      - goharbor/harbor-core:v2.15.4
+      - goharbor/harbor-db:v2.15.4
+      - goharbor/redis-photon:v2.15.4
+      - goharbor/harbor-portal:v2.15.4
+      - goharbor/harbor-jobservice:v2.15.4
+      - goharbor/registry-photon:v2.15.4
+      - goharbor/harbor-registryctl:v2.15.4
+      - goharbor/trivy-adapter-photon:v2.15.4
+      - goharbor/harbor-proxy:v2.15.4 # Harbor 自己內建的 nginx（prepare 產出 docker-compose.yml 的 proxy service），跟這個專案自己的 nginx-proxy 不是同一個東西
+  - service: nginx-proxy
+    images:
+      - docker.io/library/nginx:stable

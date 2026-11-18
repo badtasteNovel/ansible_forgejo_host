@@ -1,0 +1,14 @@
+# harbor-install.yml 要用的值——裝機前在控制節點就全部知道，這裡整份渲染好
+# 注入 ISO，harbor-install.yml 用 vars_files 讀這個檔案，不用自己猜/寫死。
+# 跟 harbor.yml 不一樣：harbor.yml 是 Harbor 自己讀的設定檔；這份是給
+# harbor-install.yml 這支 Ansible playbook自己用的（API 認證密碼、組 URL
+# 要用的 port，還有 ufw 規則要用的來源子網）。
+harbor_admin_password: "{{ harbor_admin_password }}"
+harbor_internal_http_port: {{ harbor_internal_http_port }} # Harbor 自己只在 127.0.0.1 上講明文 HTTP 的那個埠，不是對外埠
+harbor_hostname: "{{ harbor_hostname }}" # client 端實際連線用的名字（nginx-proxy 後面的 vhost），不是 Harbor 自己 bind 的位址
+nginx_proxy_https_port: {{ nginx_proxy_https_port }} # client 端實際連線用的埠（打在 nginx-proxy 上，不是 harbor_internal_http_port）
+harbor_version: "{{ harbor_version }}"
+harbor_user: "{{ harbor_user }}"
+harbor_home: "{{ harbor_home }}"
+vm_harbor_mount_path: "{{ vm_harbor_mount_path }}"
+wireguard_vm_address: "{{ wireguard_vm_address }}"

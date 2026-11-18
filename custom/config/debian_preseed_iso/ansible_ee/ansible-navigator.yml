@@ -1,0 +1,54 @@
+# ansible-navigator 的設定檔——bootstrap-services（Go 程式）呼叫
+# `ansible-navigator run --ee-vars-file ... harbor-install.yml`（或
+# nginx-proxy-install.yml）時，ansible-navigator 會自動找這個檔案（跟被執行的
+# playbook 放同一層，或用 ANSIBLE_NAVIGATOR_CONFIG 指到這裡）。
+#
+# mode: stdout（不是預設的 interactive TUI）——這支會被 bootstrap-services
+# 這個互動程式用子行程方式呼叫，輸出要直接灌進同一個終端機，不需要、也不能
+# 跳出 ansible-navigator 自己的全螢幕介面。
+#
+# execution-environment 的 volume-mounts 把 VM 主機的 /etc、/home、/run、
+# /var/lib、/var/cache、/opt、/usr/local/share/ca-certificates 原封不動掛進
+# 容器同一個路徑——這兩支 playbook 要做 useradd、寫 systemd unit、改
+# /etc/subuid、操作 rootless podman 的儲存層，這些都是會動到 VM 主機真實
+# 狀態的操作，不是容器自己關起門來的事。--privileged --pid=host 讓容器裡的
+# systemctl 真的能透過掛進來的 /run/systemd socket 跟 VM 主機的 systemd 講話。
+# 這塊設定沒有實機驗證過，見 execution-environment.yml 開頭的說明。
+ansible-navigator:
+  mode: stdout
+  execution-environment:
+    enabled: true
+    image: localhost/vm-ansible-ee:latest
+    container-engine: podman
+    pull:
+      policy: missing
+    container-options:
+      - "--privileged"
+      - "--pid=host"
+      - "--network=host"
+    volume-mounts:
+      - src: /etc
+        dest: /etc
+        options: rw
+      - src: /home
+        dest: /home
+        options: rw
+      - src: /run
+        dest: /run
+        options: rw
+      - src: /var/lib
+        dest: /var/lib
+        options: rw
+      - src: /var/cache
+        dest: /var/cache
+        options: rw
+      - src: /opt
+        dest: /opt
+        options: rw
+      - src: /usr/local/share/ca-certificates
+        dest: /usr/local/share/ca-certificates
+        options: rw
+  playbook-artifact:
+    enable: false # 不需要留執行紀錄檔案，journalctl/bootstrap-services 自己的輸出就夠用
+  logging:
+    level: warning

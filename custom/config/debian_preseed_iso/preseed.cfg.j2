@@ -1,3 +1,6 @@
+### 此任務由 control-panel/debian.yml 進行 透過重新打包 iso 的任務，將 iso 檔案從 working directory複製到 iso 中。
+
+
 ### Localization
 d-i debian-installer/locale string {{ locale | default('en_US.UTF-8') }}
 d-i keyboard-configuration/xkb-keymap select {{ keyboard_layout | default('us') }}
@@ -44,8 +47,16 @@ d-i partman/confirm_nooverwrite boolean true
 d-i base-installer/kernel/image string linux-image-amd64
 
 ### Package selection
+### podman/podman-compose/buildah/ansible/yq/pipx/jq/curl 全部無條件裝、每台
+### 都有——Harbor 裝不裝是開機後 bootstrap-services（見下面 services/ 那組
+### shell script 的說明）才會知道的決定，build 這個當下沒有 install_harbor
+### 這種旗標可以判斷，套件清單只能全部無條件裝好：yq 是 harbor-install.yml
+### 要用的（改 docker-compose.yml）；pipx 是 services/config.sh 用來裝
+### ansible-builder/ansible-navigator 的（這兩個工具不在 Debian 的 apt 套件
+### 庫裡，只能透過 pipx 裝）；jq/curl 是 services/*.sh 自己要用的（解析表單
+### JSON/proxy_map.json、抓外部 Harbor 的 CA）。
 tasksel tasksel/first multiselect standard
-d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony
+d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible yq pipx jq curl
 d-i pkgsel/upgrade select none
 popularity-contest popularity-contest/participate boolean false
 
@@ -56,118 +67,20 @@ d-i grub-installer/bootdev string default
 ### Finishing installation
 d-i finish-install/reboot_in_progress note
 
-### Late command — 寫入 SSH 公鑰、關閉密碼登入、開 NOPASSWD sudo（反正沒有密碼可輸入）、
-### 換掉 openssh-server 自動生成的 host key，改用控制端預先產生好的那一組
-### （/cdrom/ssh_host_key、/cdrom/ssh_host_key.pub 是 remaster-iso.sh 塞進 ISO 根目錄的檔案，
-### 用複製檔案而不是在這裡塞金鑰內容，是為了避開私鑰裡的換行在這種單行 shell 指令字串裡轉義的問題）；
-### 同一招也用在 wg0.conf 上。這台 VM 一定會被設成 WireGuard server，sshd 也一定會被鎖定成
-### 只監聽 WireGuard 位址，所以下面這段完全沒有條件判斷，每次裝機都會執行。
-###
-### authorized_keys 那行前面的 from="..."/no-*-forwarding 是 OpenSSH 的
-### authorized_keys 選項（寫在金鑰內容前面，逗號分隔），多一層限制：這把
-### charlie 的 client 金鑰只接受從 WireGuard peer 子網（wireguard_peer_subnet）
-### 連進來的連線才能用來登入，而且不能拿去做連線轉發／X11／agent forwarding。
-### 用整個子網段而不是單一 peer 的 IP，是因為這把金鑰是共用的一把，不是每個
-### peer 各自一把——鎖死某一個 peer 的 IP，其他後來加入的 peer 反而會被擋掉。
-###
-### 最後面那幾行處理第二顆磁碟（.vmx 的 scsi0:1，資料碟）——partman-auto 只
-### 設定去動 /dev/sda（系統碟），完全不碰第二顆，所以第二顆在這裡用一般的
-### parted/mkfs 手動切一個分割區、格式化成 ext4、寫進 /etc/fstab（用 UUID
-### 不用裝置名稱，比較不會因為裝置列舉順序變動而掛錯）。開機後掛在
-### vm_data_mount_path。
-###
-### parted 建完分割表之後，特意插了 partprobe + udevadm settle 才做
-### mkfs.ext4：parted 只是叫核心重讀分割表，/dev/sdb1 這個裝置節點是核心
-### 非同步透過 udev 才生出來的，中間有空窗期。late_command 的指令是用 ;
-### 串起來（不是 &&），任何一步失敗都不會中止、會繼續往下跑——在真實 ESXi
-### 上跑過一次，開機卡在「Timed out waiting for device .../by-uuid」掉進
-### emergency mode，最吻合的解釋就是這個 race：mkfs.ext4 在 /dev/sdb1 節點
-### 還沒出現時就跑了，直接失敗但沒中止，後面 blkid 查不到 UUID、吐出空
-### 字串，寫進 fstab 的是一行 UUID= 空值的紀錄，永遠對不到任何裝置，開機
-### 時死等那個裝置會一路等到 timeout——這個根因推論本身沒有另外重跑、單獨
-### 驗證過，只是目前能解釋觀察到的症狀、也是 parted 之後不等待就 mkfs 這個
-### 已知的一般性問題，先照這個理論修。
-###
-### fstab 選項也一定要帶 nofail：這台 VM 的 root 帳號整個被鎖死、沒有密碼
-### （見專案說明），只要這顆資料碟的掛載在開機當下沒有馬上成功（不管是上面
-### 這個 race 還是其他原因），沒有 nofail 的話 local-fs.target 會直接失敗，
-### 整台 VM 掉進連 root 都進不去的 emergency mode——等於直接把 VM 鎖死。
-### nofail 保留著是因為 partprobe/udevadm settle 修的是「已知的」那個 race，
-### 不代表保證未來不會再有其他原因讓這顆碟掛載失敗；這點跟網路（WireGuard）
-### 完全無關，純粹是本機掛載失敗也會造成一樣的死鎖，值得留一條保險。
-###
-### /cdrom/bootstrap-sudo、/cdrom/bootstrap-firewall.sh（分別由
-### control-panel/debian.yml 交叉編譯/渲染出來、remaster-iso 塞進 ISO 根目錄）
-### 一起複製進 charlie 家目錄下的 ~/bootstrap/ 資料夾，放在同一個資料夾方便
-### 管理，兩支都是「跑一次、成功就自己刪除自己」的一次性腳本，差別只在
-### 「誰觸發執行」：
-###
-### - bootstrap-sudo：「要不要用、什麼時候用」完全由使用者自己決定，這裡
-###   只複製檔案、不執行。charlie 平常完全沒有密碼、只能用 SSH 金鑰登入，
-###   這是刻意的安全設計，這裡不去動它；但如果哪天 WireGuard 或 SSH 本身
-###   掛了，連 ESXi console 都進不去（console 登入需要密碼，charlie 跟
-###   root 都沒有），到時候除了重建整台 VM 就沒有別的辦法了。這支腳本讓
-###   使用者趁還能 SSH 進去的時候，自己執行一次
-###   （sudo ~/bootstrap/bootstrap-sudo），互動設一個密碼、把 charlie 加進
-###   sudo group，然後把這裡寫的 /etc/sudoers.d/charlie（NOPASSWD:ALL）整個
-###   檔案刪掉——這個檔案是 late_command 自己唯一寫過的東西，裝機之後不預期
-###   會有人手動加過其他規則進去，直接整檔刪掉即可。這條規則存在的唯一理由
-###   是 charlie 一開始沒有密碼，密碼設好之後就該撤掉，讓 sudo 改走剛加進去
-###   的 sudo group 那條標準規則（要密碼），不然等於白設了密碼，認證成功到
-###   拿到 root 之間還是沒有第二層關卡。跑完自己刪除自己——預設安全姿態完全
-###   不變，純粹是多留一條「使用者自己選擇要不要開」的退路。
-###
-### - bootstrap-firewall.sh：由 systemd 自動觸發，不是使用者手動決定。下面
-###   late_command 不會直接呼叫 ufw（理由見這份檔案自己開頭的說明——在
-###   d-i chroot 裡套用 ufw 規則實測不可靠，會悄悄 fail-open），改成額外
-###   寫一個 systemd oneshot service（bootstrap-firewall.service），只
-###   enable、不在這裡真的執行，留到 VM 真開機時自動套用（那裡才是能安全
-###   直接呼叫 `ufw enable` 的地方，不是 d-i chroot），裝機完就是完整的
-###   防護狀態，不需要使用者手動介入。判斷「要不要跑」用的是
-###   ConditionPathExists=<腳本路徑>，不是 ConditionFirstBoot——後者判斷
-###   的是「/etc/machine-id 開機當下是不是空的」，是給 cloud image 那種
-###   映像檔本身沒有 machine-id、開機時才由 systemd 生成的場景用的，d-i
-###   安裝在裝機階段就已經設好 machine-id 了，用 ConditionFirstBoot 永遠
-###   判斷成「不是第一次開機」，service 永遠不會觸發（實測在真實 ESXi 上
-###   踩過）。改用腳本檔案還在不在當條件：腳本成功執行完會自我刪除（見
-###   腳本自己開頭用 trap ... EXIT 的說明），第一次開機檔案還在、條件成立、
-###   執行、成功、自刪；之後每次開機檔案已經不在，條件不成立，systemd
-###   乾淨地跳過（skipped，不是 failed），不會留下永遠失敗的 unit。
-###
-### 下面這段（inotify / chrony / ufw）是直接烘焙進每一台 VM 的基礎設施調整，
-### 不是這台 VM 專屬的身分資料，所以不像 SSH host key / wg0.conf 需要每台各自
-### 一份——裝機當下寫死即可，裝多少台都是同一份設定：
-###
-### - inotify：調高 fs.inotify.max_user_watches/max_user_instances，避免之後
-###   這台機器上要是跑了監看大量檔案的服務（例如 Kubernetes 相關元件）動不動
-###   就報 "Too many open files"。寫進 /etc/sysctl.d/，開機時 systemd-sysctl
-###   服務會自動套用，這裡不用另外呼叫 sysctl --system。
-###
-### - chrony：取代 systemd-timesyncd 校時，對外對準 time.stdtime.gov.tw +
-###   pool.ntp.org，同時 allow {{ wireguard_peer_subnet }}，讓這台機器也能被
-###   同一個 WireGuard 網段裡的其他機器當 NTP peer 使用。makestep 放寬成
-###   「只要落差超過 1 秒、不限次數都允許直接 step」（預設只有開機後前幾次
-###   才給這個額度），避免 VM 時鐘因為 host 暫停/搬遷等原因飄掉之後再也追不回來。
-###
-### - ufw：規則內容（預設 deny incoming / allow outgoing，只開 WireGuard 監聽埠
-###   /SSH port/chrony 123 這三種，來源分別限制成 {{ lan_subnet }} 跟
-###   {{ wireguard_peer_subnet }}）本來也打算在這裡的 late_command 裡用
-###   `in-target ufw ...` 直接套用，但實測發現這個指令在 d-i 安裝環境自己的
-###   chroot 裡執行會悄悄 fail-open（ufw 開機後顯示 active，規則數卻是 0，
-###   等於完全沒有防火牆在擋），late_command 又是用 ; 串接、任何一步失敗都
-###   不會中止，所以裝機過程完全看不出這個問題——已經在真實 ESXi 上踩過一次。
-###   現在改成不在這裡碰 ufw，規則內容搬進 bootstrap-firewall.sh（見上面
-###   bootstrap-sudo 那段的說明），透過 bootstrap-firewall.service 在 VM
-###   第一次真開機時自動套用一次，那裡才是能安全直接呼叫 `ufw enable` 的
-###   地方（不是 d-i chroot，是真正跑起來的系統）。
 d-i preseed/late_command string \
+  in-target pipx install ansible-builder; \
+  in-target pipx install ansible-navigator; \
   mkdir -p /target/home/{{ vm_user }}/.ssh; \
   echo 'from="{{ wireguard_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   mkdir -p /target/home/{{ vm_user }}/bootstrap; \
   cp /cdrom/bootstrap-sudo /target/home/{{ vm_user }}/bootstrap/bootstrap-sudo; \
   cp /cdrom/bootstrap-firewall.sh /target/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh; \
+  cp /cdrom/bootstrap-services /target/home/{{ vm_user }}/bootstrap/bootstrap-services; \
+  cp -r /cdrom/services /target/home/{{ vm_user }}/bootstrap/services; \
   chmod 700 /target/home/{{ vm_user }}/bootstrap/bootstrap-sudo; \
   chmod 700 /target/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh; \
+  chmod 700 /target/home/{{ vm_user }}/bootstrap/bootstrap-services; \
+  chmod -R 700 /target/home/{{ vm_user }}/bootstrap/services; \
   chmod 700 /target/home/{{ vm_user }}/bootstrap; \
   chmod 700 /target/home/{{ vm_user }}/.ssh; \
   chmod 600 /target/home/{{ vm_user }}/.ssh/authorized_keys; \
@@ -213,6 +126,37 @@ d-i preseed/late_command string \
   echo 'makestep 1 -1' >> /target/etc/chrony/chrony.conf; \
   in-target systemctl disable systemd-timesyncd; \
   in-target systemctl enable chrony; \
+  mkdir -p /target/opt/bootstrap/common; \
+  cp /cdrom/rootless_podman_user_setup.yml /target/opt/bootstrap/common/rootless_podman_user_setup.yml; \
+  chmod 700 /target/opt/bootstrap/common; \
+  chmod 600 /target/opt/bootstrap/common/rootless_podman_user_setup.yml; \
+  mkdir -p /target/opt/bootstrap/nginx/certs /target/opt/bootstrap/nginx/conf.d; \
+  cp /cdrom/nginx-proxy-ca.crt /target/opt/bootstrap/nginx/certs/ca.crt; \
+  cp /cdrom/nginx_proxy_runtime_vars.yml /target/opt/bootstrap/nginx/nginx_proxy_runtime_vars.yml; \
+  cp /cdrom/nginx-proxy-install.yml /target/opt/bootstrap/nginx/nginx-proxy-install.yml; \
+  cp /cdrom/harbor.conf /target/opt/bootstrap/nginx/conf.d/harbor.conf; \
+  cp /cdrom/harbor.crt /target/opt/bootstrap/nginx/certs/harbor.crt; \
+  cp /cdrom/harbor.key /target/opt/bootstrap/nginx/certs/harbor.key; \
+  chmod 700 /target/opt/bootstrap/nginx; \
+  chmod 600 /target/opt/bootstrap/nginx/certs/ca.crt /target/opt/bootstrap/nginx/nginx_proxy_runtime_vars.yml /target/opt/bootstrap/nginx/nginx-proxy-install.yml /target/opt/bootstrap/nginx/conf.d/harbor.conf /target/opt/bootstrap/nginx/certs/harbor.crt /target/opt/bootstrap/nginx/certs/harbor.key; \
+  mkdir -p /target/opt/bootstrap/harbor; \
+  cp /cdrom/harbor.yml /target/opt/bootstrap/harbor/harbor.yml; \
+  cp /cdrom/harbor_runtime_vars.yml /target/opt/bootstrap/harbor/harbor_runtime_vars.yml; \
+  cp /cdrom/harbor-install.yml /target/opt/bootstrap/harbor/harbor-install.yml; \
+  cp /cdrom/proxy_map.json /target/opt/bootstrap/harbor/proxy_map.json; \
+  chmod 700 /target/opt/bootstrap/harbor; \
+  chmod 600 /target/opt/bootstrap/harbor/harbor.yml /target/opt/bootstrap/harbor/harbor_runtime_vars.yml /target/opt/bootstrap/harbor/harbor-install.yml /target/opt/bootstrap/harbor/proxy_map.json; \
+  mkdir -p /target/opt/bootstrap/ansible-ee; \
+  cp /cdrom/execution-environment.yml /target/opt/bootstrap/ansible-ee/execution-environment.yml; \
+  cp /cdrom/ansible-navigator.yml /target/opt/bootstrap/ansible-ee/ansible-navigator.yml; \
+  chmod 755 /target/opt/bootstrap/ansible-ee; \
+  chmod 644 /target/opt/bootstrap/ansible-ee/execution-environment.yml /target/opt/bootstrap/ansible-ee/ansible-navigator.yml; \
+  parted -s /dev/sdc mklabel gpt mkpart primary ext4 0% 100%; \
+  partprobe /dev/sdc; \
+  udevadm settle; \
+  mkfs.ext4 -F /dev/sdc1; \
+  mkdir -p /target{{ vm_harbor_mount_path }}; \
+  echo "UUID=$(blkid -s UUID -o value /dev/sdc1) {{ vm_harbor_mount_path }} ext4 defaults,nofail 0 2" >> /target/etc/fstab; \
   parted -s /dev/sdb mklabel gpt mkpart primary ext4 0% 100%; \
   partprobe /dev/sdb; \
   udevadm settle; \

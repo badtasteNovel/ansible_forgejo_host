@@ -32,6 +32,12 @@ scsi0:0.deviceType = "scsi-hardDisk"
 scsi0:1.present = "TRUE"
 scsi0:1.fileName = "{{ vm_name }}-data.vmdk"
 scsi0:1.deviceType = "scsi-hardDisk"
+# 第三顆碟（Harbor 用）無條件建立——裝不裝 Harbor 現在是開機後 bootstrap-services
+# 才知道的決定，build 這個當下沒有 install_harbor 這種旗標可以判斷，見
+# playbook/control-panel/debian.yml 開頭的說明。
+scsi0:2.present = "TRUE"
+scsi0:2.fileName = "{{ vm_name }}-harbor.vmdk"
+scsi0:2.deviceType = "scsi-hardDisk"
 
 ide1:0.present = "TRUE"
 ide1:0.deviceType = "cdrom-image"

@@ -14,8 +14,9 @@ set -euo pipefail
 
 usage() {
   echo "Usage: $0 <source.iso> <extra_files_dir> <output.iso>" >&2
-  echo "  extra_files_dir 底下的每個檔案都會被複製到 ISO 根目錄" \
-    "（至少要有 preseed.cfg，late_command 裡用 /cdrom/<檔名> 存取其他檔案）" >&2
+  echo "  extra_files_dir 底下的每個檔案（含子目錄，整個遞迴複製）都會被複製" \
+    "到 ISO 根目錄（至少要有 preseed.cfg，late_command 裡用 /cdrom/<路徑>" \
+    "存取其他檔案）" >&2
   exit 1
 }
 
@@ -46,7 +47,10 @@ mkdir -p "$EXTRACT_DIR"
 xorriso -indev "$SRC_ISO" -osirrox on -extract / "$EXTRACT_DIR"
 
 chmod -R u+w "$EXTRACT_DIR"
-cp "$EXTRA_FILES_DIR"/* "$EXTRACT_DIR/"
+# -r：extra_files_dir 底下現在不只有扁平檔案，還有子目錄（例如 services/，
+# bootstrap-services 表單問完之後真正做事的那組 shell script，整個目錄一起
+# 搬進 ISO，不是逐檔複製），沒有 -r 複製到目錄會直接失敗。
+cp -r "$EXTRA_FILES_DIR"/* "$EXTRACT_DIR/"
 
 PRESEED_KARGS='auto=true priority=critical preseed/file=/cdrom/preseed.cfg'
 

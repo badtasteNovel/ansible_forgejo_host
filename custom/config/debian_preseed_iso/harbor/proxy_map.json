@@ -1,0 +1,11 @@
+[
+  { "project": "dockerhub-proxy", "name": "docker-hub", "type": "docker-hub", "url": "https://hub.docker.com", "registry_host": "docker.io" },
+  { "project": "ghcr-proxy", "name": "docker-registry-ghcr", "type": "docker-registry", "url": "https://ghcr.io", "registry_host": "ghcr.io" },
+  { "project": "quay-proxy", "name": "docker-registry-quay", "type": "docker-registry", "url": "https://quay.io", "registry_host": "quay.io" },
+  { "project": "k8s-proxy", "name": "docker-registry-k8s", "type": "docker-registry", "url": "https://registry.k8s.io", "registry_host": "registry.k8s.io" },
+  { "project": "kyverno-proxy", "name": "docker-registry-kyverno", "type": "docker-registry", "url": "https://reg.kyverno.io", "registry_host": "reg.kyverno.io" },
+  { "project": "forgejo-proxy", "name": "docker-registry-forgejo", "type": "docker-registry", "url": "https://code.forgejo.org", "registry_host": "code.forgejo.org" },
+  { "project": "ecr-public-proxy", "name": "docker-registry-ecr-public", "type": "docker-registry", "url": "https://ecr-public.aws.com", "registry_host": "ecr-public.aws.com" },
+  { "project": "gcr-proxy", "name": "docker-registry-gcr", "type": "docker-registry", "url": "https://gcr.io", "registry_host": "gcr.io" },
+  { "project": "codeberg-proxy", "name": "docker-registry-codeberg", "type": "docker-registry", "url": "https://codeberg.org", "registry_host": "codeberg.org" }
+]

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "meta.json —— 這個 repo 的部署設定",
+  "description": "跟著 repo 一起 commit 的設定，仿照 lg-laravel 專案的 meta.json 慣例（JSON、嚴格不吃註解，Taskfile.yaml 用內建 fromJson 解析）。這個專案目前只建一台 VM，不是多環境/多節點的 cluster，所以沒有照搬 lg-laravel 那份裡 php_base_version/k3s_version/context/dev/stage/production 這些跟 Laravel/cluster 強綁定的欄位——目前只有 registry（Harbor）這一個區塊，之後這個專案如果真的往 k3s host 發展，再照同樣的模式繼續加。",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "指向這個檔案（./meta.schema.json），讓編輯器提供補全與說明"
+    },
+    "registry": {
+      "type": "object",
+      "description": "VM 本機要不要裝 Harbor pull-through cache 鏡像站（podman-compose 跑，見 playbook/control-panel/debian.yml 的 install_harbor 分支）。這裡只決定 port/image，不決定對外位址/埠——Harbor 自己完全不對外，TLS 統一由獨立的 nginx 反代（nginx-proxy，每台 VM 都強制會裝）集中終止，client 端實際連線用的是 nginx-proxy 的埠（固定 443）+ Harbor 的 hostname，不是這裡的 port。整個 registry 區塊本身不是『裝不裝』的開關——那個開關是 task build:debian 表單裡的互動問題，這裡只決定裝的話要用什麼設定。",
+      "required": ["port", "image"],
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "description": "Harbor 自己在 127.0.0.1 上講明文 HTTP 的內部埠，預設 45443——不是對外埠，對外一律透過 nginx-proxy（固定 443）"
+        },
+        "image": {
+          "type": "string",
+          "description": "用哪套 registry 軟體，純標示用（程式不讀）。目前是 goharbor/harbor；實際版本以 Harbor playbook 裡的 harbor_version 變數為準。"
+        }
+      }
+    }
+  }
+}

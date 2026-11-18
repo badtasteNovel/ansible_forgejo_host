@@ -8,6 +8,20 @@ includes:
   windows: ./custom/scripts/tasks/go-task/windows.yaml
   network: ./custom/scripts/tasks/go-task/network.yaml
 
+vars:
+  # meta.json 是這個 repo 的部署設定，跟著 repo 一起 commit，仿照 lg-laravel 專案的
+  # 慣例：用 Task 內建的 fromJson 解析（嚴格 JSON，不依賴 jq 這種外部工具）。目前
+  # 只有 registry（Harbor）這個區塊在用，下游一律用 {{.REGISTRY_PORT}}/
+  # {{.REGISTRY_IMAGE}}，不要在個別 task 裡寫死數字。
+  RAW_META_JSON:
+    sh: cat meta.json
+  META:
+    ref: "fromJson .RAW_META_JSON"
+  REGISTRY_PORT:
+    ref: ".META.registry.port"
+  REGISTRY_IMAGE:
+    ref: ".META.registry.image"
+
 tasks:
   select-iso:
     desc: "互動式選擇要使用的 ISO 檔案（印出選中檔案的路徑）"
@@ -29,6 +43,7 @@ tasks:
     cmds:
       - git clean -fdX custom/generated/iso
       - git clean -fdX custom/generated/preseed
+      - git clean -fdX custom/generated/ca
       - |
         if gum confirm --default=false "確定刪除所有keys"; then
           git clean -fdX custom/generated/keys

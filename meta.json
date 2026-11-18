@@ -1,0 +1,7 @@
+{
+	"$schema": "./meta.schema.json",
+	"registry": {
+		"port": 45443,
+		"image": "goharbor/harbor"
+	}
+}

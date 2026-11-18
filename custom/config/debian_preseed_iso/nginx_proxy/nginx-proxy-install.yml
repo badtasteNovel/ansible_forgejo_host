@@ -1,0 +1,197 @@
+---
+# nginx 反代安裝 playbook——跟 Harbor 不一樣，這支是強制功能，不是使用者在
+# bootstrap-services 表單裡自己選的；但「什麼時候裝」現在也統一由
+# bootstrap-services 決定時機（先處理完 Harbor 那塊、registries.conf.d mirror
+# 設好之後才觸發這支，這樣這支自己要 pull 的 nginx image 才吃得到 Harbor 的
+# pull-through cache），用 ansible-navigator 執行（見 execution-environment.yml），
+# 不是 systemd 在開機時自動觸發，跑在 VM 自己身上（hosts: localhost,
+# connection: local）。
+#
+# 這個 nginx 是整台 VM 對外的唯一入口，TLS 在這裡集中終止，以後每多一個用
+# podman 跑的服務（不只 Harbor），都是在這個 nginx 後面加一個 server block，
+# 不需要各自另外開防火牆洞（ufw 只開這支服務自己的對外埠一次，見
+# bootstrap-firewall.sh.j2）。
+#
+# 每個服務要給這個 nginx 代理的東西（憑證、vhost conf），都是控制節點裝機前
+# 就已經簽好/渲染好、隨 ISO 一起注入到 /opt/bootstrap/nginx/{certs,conf.d}/
+# 底下（見 control-panel/debian.yml）——這裡只負責「把 nginx 這個容器本身架起來、
+# 把暫存資料夾裡現有的東西搬到最終位置」，完全不需要知道後面實際代理了哪些
+# 服務、也不需要在執行期跟其他服務的安裝 playbook 互動（例如 harbor-install.yml
+# 完全不會回頭去改這支 playbook 產生的任何東西）——Harbor 的 vhost conf/憑證
+# 現在無條件烘焙進 ISO，conf.d/certs 暫存資料夾裡一定會有 Harbor 那份，以後
+# 新增其他服務也是一樣的模式，這裡用迴圈把「現在看到什麼就搬什麼」，不假設
+# 內容。
+#
+# 全程以 nginx-proxy 這個 rootless 專屬系統使用者的身份跑 podman/systemctl --user
+# （容器逃逸拿不到主機 root，也跟 harbor 使用者彼此隔離），rootless 使用者設置
+# 那段跟 harbor-install.yml 共用同一份 custom/scripts/tasks/ansible/rootless_podman_user/setup.yml。
+#
+# nginx-proxy 容器用 --network=host，不是 -p 單純 port mapping：它要反代的
+# 後端（Harbor 之類）是「另一個 rootless 使用者」自己的 podman-compose 服務，
+# 綁在 VM 主機的 127.0.0.1 上（見 harbor-install.yml 限制 proxy service port
+# 那段）。如果 nginx-proxy 用自己獨立的 network namespace（-p 的預設行為），
+# 它容器內的 127.0.0.1 只會指向自己，完全摸不到主機的 127.0.0.1，等於永遠連
+# 不到任何後端。--network=host 讓 nginx 直接共用 VM 主機的網路堆疊，才能用
+# 127.0.0.1 連到其他 rootless 使用者各自發布在主機 loopback 上的服務——也因為
+# 這樣，nginx 自己的 server block 要明確 listen {{ wireguard_vm_address }}，
+# 不能只寫埠號（host network 下不寫位址會變成監聽主機所有介面，等於繞過
+# sshd 那種「只綁 WireGuard 位址」的既有慣例）。
+
+- name: 在 VM 上把 nginx 反代架起來（podman，rootless，TLS 集中終止）
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - /opt/bootstrap/nginx/nginx_proxy_runtime_vars.yml
+
+  vars:
+    nginx_proxy_staging_dir: /opt/bootstrap/nginx # late_command 複製進來的暫存位置（nginx-proxy 使用者裝機當下還不存在，late_command 沒辦法直接 chown 給它）
+    nginx_proxy_conf_dir: "{{ nginx_proxy_home }}/conf.d"
+    nginx_proxy_cert_dir: "{{ nginx_proxy_home }}/certs"
+    nginx_proxy_image: "docker.io/library/nginx:stable"
+
+  tasks:
+    # ────────────────────────── rootless 使用者 ──────────────────────────
+
+    - name: 建立 nginx-proxy 這個 rootless 專屬系統使用者
+      ansible.builtin.include_tasks:
+        file: /opt/bootstrap/common/rootless_podman_user_setup.yml # 原始檔是 custom/scripts/tasks/ansible/rootless_podman_user/setup.yml，裝機前由 control-panel/debian.yml 複製進 ISO——這支 playbook 跑在 VM 上，摸不到控制節點的 repo，只能吃注入進來的這份
+      vars:
+        rootless_user_name: "{{ nginx_proxy_user }}"
+        rootless_service_dirs:
+          - "{{ nginx_proxy_home }}"
+          - "{{ nginx_proxy_conf_dir }}"
+          - "{{ nginx_proxy_cert_dir }}"
+
+    # ────────────────────────── 憑證/設定檔就位 ──────────────────────────
+    # 每個服務的 CA/leaf 憑證、vhost conf 已經由控制節點簽好/渲染好、隨 ISO
+    # 注入到 {{ nginx_proxy_staging_dir }}，這裡只是搬到 nginx-proxy 使用者
+    # 讀得到的最終位置、設對擁有者/權限——現在暫存資料夾裡有什麼就搬什麼，
+    # 不假設/不檢查是哪個服務的。
+
+    - name: 列出暫存資料夾裡現有的憑證檔案（可能是空的——沒有任何服務裝 HTTPS vhost 時）
+      ansible.builtin.find:
+        paths: "{{ nginx_proxy_staging_dir }}/certs"
+        file_type: file
+      register: staged_cert_files
+
+    - name: 列出暫存資料夾裡現有的 vhost conf 檔案（可能是空的）
+      ansible.builtin.find:
+        paths: "{{ nginx_proxy_staging_dir }}/conf.d"
+        file_type: file
+      register: staged_conf_files
+
+    - name: 搬憑證檔案到最終位置
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ nginx_proxy_cert_dir }}/{{ item.path | basename }}"
+        remote_src: true
+        owner: "{{ nginx_proxy_user }}"
+        group: "{{ nginx_proxy_user }}"
+        mode: "0640"
+      loop: "{{ staged_cert_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: 搬 vhost conf 檔案到最終位置
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ nginx_proxy_conf_dir }}/{{ item.path | basename }}"
+        remote_src: true
+        owner: "{{ nginx_proxy_user }}"
+        group: "{{ nginx_proxy_user }}"
+        mode: "0644"
+      loop: "{{ staged_conf_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+
+    - name: 把 CA 灌進系統信任庫（這台機器上的 podman/buildah/curl 要信任自己這個 nginx 簽出來的憑證——以後這台 VM 當 k3s host 時，本機自己 pull 自己背後的服務也要用到）
+      ansible.builtin.copy:
+        src: "{{ nginx_proxy_staging_dir }}/certs/ca.crt"
+        dest: /usr/local/share/ca-certificates/nginx-proxy-ca.crt
+        remote_src: true
+        mode: "0644"
+      register: ca_trust_copy
+
+    - name: update-ca-certificates（只有真的換了 CA 才需要重跑）
+      ansible.builtin.command: update-ca-certificates
+      when: ca_trust_copy is changed
+      changed_when: true
+
+    # ────────────────────────── 起服務 ──────────────────────────
+
+    - name: pull nginx image
+      ansible.builtin.command: podman pull {{ nginx_proxy_image }}
+      become: true
+      become_user: "{{ nginx_proxy_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: true
+
+    - name: 建 ~nginx-proxy/.config/systemd/user/（daemon-reload 前要先有目錄）
+      ansible.builtin.file:
+        path: "/home/{{ nginx_proxy_user }}/.config/systemd/user"
+        state: directory
+        owner: "{{ nginx_proxy_user }}"
+        group: "{{ nginx_proxy_user }}"
+        mode: "0750"
+
+    - name: 裝 systemd **user** unit（~nginx-proxy/.config/systemd/user，靠 linger 開機自動起）
+      ansible.builtin.copy:
+        dest: "/home/{{ nginx_proxy_user }}/.config/systemd/user/nginx-proxy.service"
+        owner: "{{ nginx_proxy_user }}"
+        group: "{{ nginx_proxy_user }}"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=nginx reverse proxy (rootless podman, TLS termination for every service behind it)
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStartPre=-/usr/bin/podman rm -f nginx-proxy
+          ExecStart=/usr/bin/podman run -d --name nginx-proxy --network=host \
+            -v {{ nginx_proxy_conf_dir }}:/etc/nginx/conf.d:z,ro \
+            -v {{ nginx_proxy_cert_dir }}:/etc/nginx/certs:z,ro \
+            {{ nginx_proxy_image }}
+          ExecStop=/usr/bin/podman stop nginx-proxy
+          Restart=on-failure
+          RestartSec=15
+
+          [Install]
+          WantedBy=default.target
+
+    - name: systemctl --user daemon-reload + enable + start nginx-proxy.service
+      ansible.builtin.command: "{{ item }}"
+      become: true
+      become_user: "{{ nginx_proxy_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: true
+      loop:
+        - systemctl --user daemon-reload
+        - systemctl --user enable --now nginx-proxy.service
+
+    - name: 確認 nginx-proxy 容器真的跑起來了
+      ansible.builtin.command: podman ps --filter name=nginx-proxy --filter status=running --format {% raw %}'{{.Names}}'{% endraw %} # {% raw %}...{% endraw %} 包起來，不然 Ansible 自己的 Jinja2 會把 podman 的 Go template 語法一起吃掉
+      become: true
+      become_user: "{{ nginx_proxy_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: false
+      register: nginx_proxy_running_check
+      retries: 10
+      delay: 3
+      until: nginx_proxy_running_check.stdout | trim == 'nginx-proxy'
+
+    # ────────────────────────── 收尾 ──────────────────────────
+
+    - name: 清掉暫存資料夾（憑證/conf 原始檔都已經搬到最終位置，這份暫存留著沒用）
+      ansible.builtin.file:
+        path: "{{ nginx_proxy_staging_dir }}"
+        state: absent
+
+    - name: 印出結果（journalctl -u bootstrap-nginx-proxy 看得到這段）
+      ansible.builtin.debug:
+        msg:
+          - "nginx 反代已就緒，監聽 {{ wireguard_vm_address }}:{{ nginx_proxy_https_port }}（只能從 WireGuard 隧道連）"
+          - "目前代理的服務數量：{{ staged_conf_files.files | length }}（每多裝一個服務，這裡會多一個 vhost）"

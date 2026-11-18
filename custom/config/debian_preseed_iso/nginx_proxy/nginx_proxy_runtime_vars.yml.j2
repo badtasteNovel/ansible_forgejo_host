@@ -1,0 +1,9 @@
+# nginx-proxy-install.yml 要用的值——裝機前在控制節點就全部知道，這裡整份
+# 渲染好注入 ISO，nginx-proxy-install.yml 用 vars_files 讀這個檔案，不用自己
+# 猜/寫死。這支無條件渲染（跟 harbor_runtime_vars.yml 現在一樣都是無條件渲染，
+# 差別只在 nginx-proxy 本身是強制功能，harbor_runtime_vars.yml 渲染出來的
+# 東西最後用不用得到要看 bootstrap-services 的決定）。
+nginx_proxy_user: "{{ nginx_proxy_user }}"
+nginx_proxy_home: "{{ nginx_proxy_home }}"
+nginx_proxy_https_port: {{ nginx_proxy_https_port }}
+wireguard_vm_address: "{{ wireguard_vm_address }}"

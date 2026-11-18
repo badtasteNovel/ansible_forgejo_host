@@ -1,0 +1,82 @@
+# Harbor 設定模板——跟 wg0.conf.j2/preseed.cfg.j2 同一套做法：所有值在控制節點
+# 裝機前就已經全部知道（密碼來自 custom/.env），直接整份渲染好注入 ISO，VM 開機後
+# 不用再用 sed/現場組這個檔案。對照的原始版本（lg-laravel 專案
+# deploy/podman/harbor/harbor.yml.tpl）是用佔位符 + sed 替換，這裡改成 Jinja2
+# 直接渲染，道理一樣。
+#
+# 這套 Harbor 只擔任 pull-through cache（proxy cache），代理 docker.io / ghcr.io /
+# quay.io / registry.k8s.io 等上游，不放自建 image（見 harbor-install.yml 的
+# PROXY_MAP）。
+#
+# Harbor 自己完全不碰 TLS——只在 127.0.0.1 上講明文 HTTP（見 harbor-install.yml
+# 把 docker-compose.yml 的 proxy service port 限制在 loopback 那段），TLS 統一
+# 由獨立的 nginx 反代（nginx-proxy）集中終止，Harbor 不知道、也不需要知道自己
+# 被掛在哪個 hostname/對外埠後面。external_url 填的是「client 端實際連線時看到
+# 的位址」（過了 nginx 之後的那個），不是 Harbor 自己的 http.port——Harbor 用這個
+# 值組 redirect Location 之類的絕對 URL，要跟 client 端真正打的位址一致。
+
+hostname: {{ harbor_hostname }}
+
+http:
+  port: {{ harbor_internal_http_port }}
+
+external_url: https://{{ harbor_hostname }}:{{ nginx_proxy_https_port }}
+
+harbor_admin_password: {{ harbor_admin_password }}
+
+database:
+  password: {{ harbor_db_password }}
+  max_idle_conns: 100
+  max_open_conns: 900
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 0
+
+data_volume: {{ vm_harbor_mount_path }}
+
+trivy:
+  ignore_unfixed: false
+  skip_update: false
+  skip_java_db_update: false
+  offline_scan: false
+  security_check: vuln
+  insecure: false
+
+jobservice:
+  max_job_workers: 10
+  job_loggers:
+    - STD_OUTPUT
+    - FILE
+  logger_sweeper_duration: 1
+
+notification:
+  webhook_job_max_retry: 3
+  webhook_job_http_client_timeout: 3
+
+log:
+  level: info
+  local:
+    rotate_count: 50
+    rotate_size: 200M
+    # 放 harbor 使用者自己的地盤（rootless：/var/log/harbor 在根目錄下建不了）
+    location: {{ vm_harbor_mount_path }}/log
+
+_version: "{{ harbor_cfg_version }}"
+
+proxy:
+  http_proxy:
+  https_proxy:
+  no_proxy:
+  components:
+    - core
+    - jobservice
+    - trivy
+
+upload_purging:
+  enabled: true
+  age: 168h
+  interval: 24h
+  dryrun: false
+
+cache:
+  enabled: false
+  expire_hours: 24
