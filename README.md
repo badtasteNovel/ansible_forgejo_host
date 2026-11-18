@@ -174,4 +174,4 @@ task clean         # 清掉 build 產物（keys 會額外二次確認）
 - `charlie` 跟 `root` 都沒有密碼；若 WireGuard 或 SSH 本身掛掉，除了 ESXi console（需要密碼，兩者都沒有）之外沒有救援路徑——這是刻意接受的 tradeoff，細節見 `CLAUDE.md`。`bootstrap-sudo` 是唯一的事後補救手段，且要在還能 SSH 進去時自己執行。
 
 ## 專案相關
-- ```custom/config/debian_preseed_iso/preseed.cfg.j2``` iso 透過 ansible playbook 渲染成 .vmx 檔案前，經過的檔案，可以改動 virtual machine config file 註冊成 virtual machine 的檔案架構
+- ```custom/config/debian_preseed_iso/preseed.cfg.j2``` 渲染成 preseed.cfg，打包入 iso ，在使用者安裝 debian 的時候使debian-installer 讀取
