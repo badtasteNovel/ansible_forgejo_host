@@ -16,7 +16,7 @@
 # tarball 裡面只有 harbor.yml.tmpl（範本），不是 harbor.yml 本身，所以
 # unarchive 不會覆蓋掉已經在用的 harbor.yml。
 
-- name: 把這台 VM 上的 Harbor 升級到指定版本
+- name: '把這台 VM 上的 Harbor 升級到指定版本'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -31,19 +31,19 @@
     harbor_internal_http_port: "{{ (lookup('file', '/srv/harbor/harbor.yml') | from_yaml).http.port }}"
 
   tasks:
-    - name: 確認有帶 harbor_version（update.sh 會用 --extra-vars 傳，這裡沒有就直接中止，不要用空值悶著頭繼續）
+    - name: '確認有帶 harbor_version（update.sh 會用 --extra-vars 傳，這裡沒有就直接中止，不要用空值悶著頭繼續）'
       ansible.builtin.assert:
         that:
           - harbor_version is defined
           - harbor_version | length > 0
         fail_msg: "沒有指定 harbor_version（例如 v2.16.0），中止升級"
 
-    - name: 查 harbor 使用者的 uid（組 rootless 執行環境變數要用；使用者本身是 harbor-install.yml 當初建好的，這裡不重建）
+    - name: '查 harbor 使用者的 uid（組 rootless 執行環境變數要用；使用者本身是 harbor-install.yml 當初建好的，這裡不重建）'
       ansible.builtin.getent:
         database: passwd
         key: "{{ harbor_user }}"
 
-    - name: 組 rootless 執行環境變數
+    - name: '組 rootless 執行環境變數'
       ansible.builtin.set_fact:
         rootless_podman_env:
           XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[harbor_user][1] }}"
@@ -53,24 +53,24 @@
 
     # ────────────────────────── 下載／校驗新版 offline installer ──────────────────────────
 
-    - name: 查詢 GitHub release 上這個版本 installer 的官方 sha256（digest 欄位）
+    - name: '查詢 GitHub release 上這個版本 installer 的官方 sha256（digest 欄位）'
       ansible.builtin.uri:
         url: "https://api.github.com/repos/goharbor/harbor/releases/tags/{{ harbor_version }}"
         return_content: true
       register: harbor_release_info
 
-    - name: 算出 installer tgz 的官方 digest
+    - name: '算出 installer tgz 的官方 digest'
       ansible.builtin.set_fact:
         harbor_tgz_digest: "{{ harbor_release_info.json.assets | selectattr('name', 'equalto', harbor_tgz_name) | map(attribute='digest') | first }}"
 
-    - name: 擋下「GitHub API 查不到這個版本/這個檔名」的情況
+    - name: '擋下「GitHub API 查不到這個版本/這個檔名」的情況'
       ansible.builtin.assert:
         that:
           - harbor_tgz_digest is defined
           - harbor_tgz_digest | length > 0
         fail_msg: "GitHub release {{ harbor_version }} 裡找不到 {{ harbor_tgz_name }} 的官方 sha256，中止升級（可能是版本號打錯，或 GitHub API 被限流）"
 
-    - name: 下載新版 Harbor offline installer（已快取就跳過；get_url 本身會校驗 checksum，對不上直接失敗）
+    - name: '下載新版 Harbor offline installer（已快取就跳過；get_url 本身會校驗 checksum，對不上直接失敗）'
       ansible.builtin.get_url:
         url: "https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}/{{ harbor_tgz_name }}"
         dest: "{{ harbor_tgz_cached_path }}"
@@ -80,7 +80,7 @@
         mode: "0644"
         timeout: 300
 
-    - name: 解壓新版 bundle 到 {{ harbor_home }}（覆蓋掉舊版的 installer 檔案；只有 harbor.yml.tmpl，不會動到正在用的 harbor.yml）
+    - name: "解壓新版 bundle 到 {{ harbor_home }}（覆蓋掉舊版的 installer 檔案；只有 harbor.yml.tmpl，不會動到正在用的 harbor.yml）"
       ansible.builtin.unarchive:
         src: "{{ harbor_tgz_cached_path }}"
         dest: "{{ harbor_home }}"
@@ -90,7 +90,7 @@
         extra_opts:
           - --strip-components=1
 
-    - name: podman load 新版 image bundle（進 harbor 使用者的 image store）
+    - name: 'podman load 新版 image bundle（進 harbor 使用者的 image store）'
       ansible.builtin.command: podman load -i {{ harbor_home }}/harbor.{{ harbor_version }}.tar.gz
       become: true
       become_user: "{{ harbor_user }}"
@@ -99,7 +99,7 @@
 
     # ────────────────────────── 重跑 prepare → 重建容器 ──────────────────────────
 
-    - name: 跑新版 goharbor/prepare（用既有的 harbor.yml 重新產生 docker-compose.yml）
+    - name: '跑新版 goharbor/prepare（用既有的 harbor.yml 重新產生 docker-compose.yml）'
       ansible.builtin.command: >
         podman run --rm --privileged --pull=never
         -v {{ harbor_home }}:/input:z
@@ -113,7 +113,7 @@
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: 移除新產出 docker-compose.yml 裡的 log service、把 proxy service 對外埠限制在 127.0.0.1——跟 harbor-install.yml 當初做的事完全一樣，每次重跑 prepare 都要重新套用一次
+    - name: '移除新產出 docker-compose.yml 裡的 log service、把 proxy service 對外埠限制在 127.0.0.1——跟 harbor-install.yml 當初做的事完全一樣，每次重跑 prepare 都要重新套用一次'
       ansible.builtin.command: >
         yq -i '
           del(.services.log)
@@ -126,14 +126,14 @@
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: podman-compose up -d（會重建 image 換了的容器，其他服務不動）
+    - name: 'podman-compose up -d（會重建 image 換了的容器，其他服務不動）'
       ansible.builtin.command: podman-compose -f {{ harbor_home }}/docker-compose.yml up -d
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: 等 Harbor API healthy
+    - name: '等 Harbor API healthy'
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ harbor_internal_http_port }}/api/v2.0/health"
         status_code: 200
@@ -142,6 +142,6 @@
       retries: 60
       delay: 5
 
-    - name: 印出結果
+    - name: '印出結果'
       ansible.builtin.debug:
         msg: "Harbor 已升級到 {{ harbor_version }}。"

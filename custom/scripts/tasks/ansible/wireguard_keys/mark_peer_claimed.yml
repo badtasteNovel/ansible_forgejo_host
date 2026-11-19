@@ -9,7 +9,7 @@
 # 通常就是 claim_peer.yml 回傳的 claimed_peer_name，呼叫端自己存成一個不會
 # 被第二次呼叫蓋掉的獨立變數再傳進來）。
 
-- name: 標記 {{ peer_to_claim }} 為已認領
+- name: "標記 {{ peer_to_claim }} 為已認領"
   ansible.builtin.copy:
     content: "claimed by {{ lookup('pipe', 'hostname') }} at {{ lookup('pipe', 'date -Iseconds') }}\n"
     dest: "{{ wireguard_peers_dir }}/{{ peer_to_claim }}/claimed"

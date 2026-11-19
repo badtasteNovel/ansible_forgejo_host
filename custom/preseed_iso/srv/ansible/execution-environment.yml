@@ -13,8 +13,10 @@
 # podman 指令。這裡裝的是 EE 自己的 podman 二進位檔（不是把 VM 主機的
 # podman 執行檔掛進容器——不同基底映像的共享函式庫版本不一定相容，直接
 # 掛執行檔風險更高），實際操作的卻是 VM 主機上真正的狀態：ansible-navigator.yml
-# 把 /etc、/home、/run、/var/lib、/var/cache、/opt 這些路徑原封不動掛進容器
-# （--privileged --pid=host），EE 自己的 podman/useradd/systemctl 寫的都是
+# 把 /etc、/home/harbor、/home/nginx-proxy、/run、/var/lib、/var/cache 這些
+# 路徑原封不動掛進容器（--privileged --pid=host，見 ansible-navigator.yml 自己
+# 的說明——故意不掛整個 /home、也不掛 /opt，理由寫在那份檔案裡），EE 自己
+# 的 podman/useradd/systemctl 寫的都是
 # 掛進來的這些真實路徑，systemctl 是透過掛進來的 /run/systemd socket 直接
 # 跟 VM 主機的 systemd 講話（socket-based IPC，不依賴執行檔本身的函式庫
 # 相容性，这塊相對穩）；rootless podman 的 overlay 儲存層（~/.local/share/containers）
@@ -27,7 +29,15 @@ version: 3
 
 images:
   base_image:
-    name: quay.io/ansible/creator-ee:latest
+    name: 'quay.io/ansible/creator-ee:latest'
+
+# ansible-builder 預設走 /usr/bin/dnf，但 quay.io/ansible/creator-ee 這個
+# base image 只有 microdnf、沒有 dnf，不指定的話 build 到一半（install-from-
+# bindep 這個內建階段）會直接噴 "/usr/bin/dnf: No such file or directory"
+# （實機重現過）。這是 ansible-builder 已知、有專門選項處理的狀況，不是
+# 這份檔案自己要繞過去的問題。
+options:
+  package_manager_path: /usr/bin/microdnf
 
 ### dependencies 整節不寫——不是寫 null，是乾脆不要有這個 key：這三個欄位的
 ### schema 是 anyOf [string, array of string]，不包含 null，null 一樣會被嚴格
@@ -36,9 +46,13 @@ images:
 ### harbor-install.yml/nginx-proxy-install.yml 只用 ansible.builtin.*，省略整節
 ### 比塞三個 null 更乾淨。
 
+# sudo 是 rootless_podman_user_setup.yml 裡 become: true/become_user 這種
+# task 要用的——become 預設走 become_method: sudo，這些 task 是在這個 EE
+# 容器裡面執行（不是在 VM 主機上），容器裡沒裝 sudo 一樣會噴 "sudo: command
+# not found"（實機重現過）。
 additional_build_steps:
   append_base:
-    - RUN microdnf install -y podman shadow-utils || (apt-get update && apt-get install -y podman passwd)
+    - RUN microdnf install -y podman shadow-utils sudo || (apt-get update && apt-get install -y podman passwd sudo)
 
 # harbor-install.yml/nginx-proxy-install.yml 實際會 pull 的 image 清單（Harbor
 # 全家桶 goharbor/* 一套 + nginx-proxy 的 docker.io/library/nginx:stable）記錄在

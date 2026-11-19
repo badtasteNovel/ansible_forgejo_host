@@ -9,13 +9,13 @@
 # 金鑰檔名用 {{ vm_name }} 當前綴——呼叫前，呼叫端要讓 vm_name 這個變數在
 # 當下的範圍內看得到（兩個呼叫端都已經把它列為必填的 play 層級變數）。
 
-- name: 確保 {{ wireguard_keys_dir }} 存在
+- name: "確保 {{ wireguard_keys_dir }} 存在"
   ansible.builtin.file:
     path: "{{ wireguard_keys_dir }}"
     state: directory
     mode: "0700"
 
-- name: 產生 VM 自己的 WireGuard 金鑰對（若已存在則不重建）
+- name: '產生 VM 自己的 WireGuard 金鑰對（若已存在則不重建）'
   ansible.builtin.shell: |
     set -euo pipefail
     umask 077

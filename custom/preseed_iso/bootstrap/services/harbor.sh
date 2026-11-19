@@ -29,6 +29,16 @@ harbor_registry=""
 harbor_setup() {
   if [ "$INSTALL_HARBOR" = "true" ]; then
     echo "==> 開始在本機安裝 Harbor（ansible-navigator run harbor-install.yml）..."
+
+    # ansible-navigator.yml 的 volume-mounts 掛了 /home/harbor——這是
+    # ansible-navigator 自己的設定檢查（不是 podman），容器還沒啟動、harbor
+    # 這個使用者還沒被 harbor-install.yml 自己的 useradd 建出來之前，host 上
+    # 就要先有這個目錄，不然直接噴 "Source: '/home/harbor' does not exist"，
+    # 連容器都起不來（實機撞過）。harbor 是 control-panel/debian.yml 寫死的
+    # rootless 使用者名稱常數，跟 ansible-navigator.yml 裡的掛載路徑一致，
+    # 這裡直接寫字串、不透過樣板傳。
+    mkdir -p /home/harbor
+
     run_navigator "$HARBOR_PLAYBOOK"
 
     # HARBOR_HOSTNAME 是 bootstrap-services 表單問出來的（預設值用這台機器

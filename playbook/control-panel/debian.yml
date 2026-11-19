@@ -22,7 +22,7 @@
 # 注意：.vmx 檔案格式、vmkfstools 語法是依 VMware 官方文件的一般知識寫的，
 # 沒有真實 ESXi 環境測過，實際跑之前請注意。
 
-- name: 產生 Debian VM 所需的所有檔案，上傳到 hypervisor 的 datastore
+- name: '產生 Debian VM 所需的所有檔案，上傳到 hypervisor 的 datastore'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -138,7 +138,7 @@
       -o UserKnownHostsFile={{ hypervisor_known_hosts_path }}
 
   tasks:
-    - name: 確認必要變數都有值
+    - name: '確認必要變數都有值'
       ansible.builtin.assert:
         that:
           - vm_name is defined
@@ -155,7 +155,7 @@
           （task select-iso 的輸出路徑）——正常透過 task build:debian 跑就
           不用自己管這兩個，Taskfile 會自動帶
 
-    - name: 確保 custom/generated/keys/、custom/generated/preseed/、custom/generated/iso/ 目錄存在
+    - name: '確保 custom/generated/keys/、custom/generated/preseed/、custom/generated/iso/ 目錄存在'
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
@@ -167,24 +167,24 @@
         - "{{ preseed_output_dir }}"
         - "{{ iso_output_dir }}"
 
-    - name: 產生 SSH 金鑰對（charlie 登入用，若已存在則不重建）
+    - name: '產生 SSH 金鑰對（charlie 登入用，若已存在則不重建）'
       community.crypto.openssh_keypair:
         path: "{{ ssh_key_path }}"
         type: ed25519
         comment: "{{ vm_user }}@{{ vm_name }}"
 
-    - name: 讀取 client 公鑰內容
+    - name: '讀取 client 公鑰內容'
       ansible.builtin.slurp:
         src: "{{ ssh_key_path }}.pub"
       register: ssh_public_key_raw
 
-    - name: 產生 VM 自己的 SSH host key（若已存在則不重建）
+    - name: '產生 VM 自己的 SSH host key（若已存在則不重建）'
       community.crypto.openssh_keypair:
         path: "{{ ssh_host_key_path }}"
         type: ed25519
         comment: "{{ vm_name }}"
 
-    - name: 把 host key 複製進 ISO 注入資料夾（用複製檔案，不把金鑰內容塞進 late_command 字串）
+    - name: '把 host key 複製進 ISO 注入資料夾（用複製檔案，不把金鑰內容塞進 late_command 字串）'
       ansible.builtin.copy:
         src: "{{ item.src }}"
         dest: "{{ preseed_output_dir }}/{{ item.dest }}"
@@ -194,13 +194,13 @@
         - { src: "{{ ssh_host_key_path }}", dest: ssh_host_key, mode: "0600" }
         - { src: "{{ ssh_host_key_path }}.pub", dest: ssh_host_key.pub, mode: "0644" }
 
-    - name: 確保 VM 自己的 WireGuard 金鑰已經產生（只有 VM 自己的身分，跟 peer 金鑰完全分開）
+    - name: '確保 VM 自己的 WireGuard 金鑰已經產生（只有 VM 自己的身分，跟 peer 金鑰完全分開）'
       ansible.builtin.include_tasks:
         file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/wireguard_keys/vm_key.yml"
       vars:
         wireguard_keys_dir: "{{ wireguard_keys_base_dir }}"
 
-    - name: 新增 {{ peer_slot_count }} 個匿名的 WireGuard peer 位置（還沒被任何機器認領，數量由 custom/scripts/tasks/go-task/build-vm.yaml 的 gum input 決定）
+    - name: "新增 {{ peer_slot_count }} 個匿名的 WireGuard peer 位置（還沒被任何機器認領，數量由 custom/scripts/tasks/go-task/build-vm.yaml 的 gum input 決定）"
       ansible.builtin.include_tasks:
         file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/wireguard_keys/generate_one_peer_slot.yml"
       loop: "{{ range(0, peer_slot_count | int) | list }}"
@@ -208,18 +208,18 @@
         label: "第 {{ item + 1 }} 個"
       when: (peer_slot_count | int) > 0
 
-    - name: 讀取 VM 自己的 WireGuard 私鑰
+    - name: '讀取 VM 自己的 WireGuard 私鑰'
       ansible.builtin.slurp:
         src: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard"
       register: wireguard_vm_private_key_raw
 
-    - name: 列出目前已經存在的 WireGuard peer 目錄（數量不固定，可能是 0 個）
+    - name: '列出目前已經存在的 WireGuard peer 目錄（數量不固定，可能是 0 個）'
       ansible.builtin.find:
         paths: "{{ wireguard_peers_dir }}"
         file_type: directory
       register: wireguard_peer_dirs
 
-    - name: 讀出每個 peer 的公鑰／PresharedKey／IP，組成清單（給 wg0.conf.j2 的 Peer 迴圈用）
+    - name: '讀出每個 peer 的公鑰／PresharedKey／IP，組成清單（給 wg0.conf.j2 的 Peer 迴圈用）'
       ansible.builtin.set_fact:
         wireguard_peers: "{{ wireguard_peers | default([]) + [{
           'name': item.path | basename,
@@ -231,7 +231,7 @@
       loop_control:
         label: "{{ item.path | basename }}"
 
-    - name: 渲染 VM 的 wg0.conf，放進 ISO 注入資料夾（Peer 區塊數量跟著 wireguard_peers 走，可能是 0 個）
+    - name: '渲染 VM 的 wg0.conf，放進 ISO 注入資料夾（Peer 區塊數量跟著 wireguard_peers 走，可能是 0 個）'
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom/template/wireguard_control_panel/wg0.conf.j2"
         dest: "{{ preseed_output_dir }}/wg0.conf"
@@ -244,7 +244,7 @@
         # 沒有時完全不會被 set_fact 設到，是 undefined，不是空字串／false，
         # 所以 wg0.conf.j2 裡用 `wireguard_peers | default([])` 接住就好）。
 
-    - name: 編譯 bootstrap-sudo（charlie SSH 進去後可以自己選擇要不要手動執行的一次性救援腳本，見 custom/scripts/bootstrap-sudo/main.go 開頭說明；go run 不適用——這支要跑在 VM 上，VM 不會有 Go 工具鏈、也不會有這份原始碼，所以這裡要交叉編譯成靜態執行檔，直接塞進 ISO）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構
+    - name: "編譯 bootstrap-sudo（charlie SSH 進去後可以自己選擇要不要手動執行的一次性救援腳本，見 custom/scripts/bootstrap-sudo/main.go 開頭說明；go run 不適用——這支要跑在 VM 上，VM 不會有 Go 工具鏈、也不會有這份原始碼，所以這裡要交叉編譯成靜態執行檔，直接塞進 ISO）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構"
       ansible.builtin.command:
         cmd: go build -o {{ preseed_bootstrap_output_dir }}/bootstrap-sudo .
         chdir: "{{ playbook_dir }}/../../custom/scripts/bootstrap-sudo"
@@ -254,13 +254,13 @@
         GOARCH: amd64
       changed_when: true
 
-    - name: 渲染 bootstrap-firewall.sh，放進 ISO 注入資料夾（late_command 在 d-i chroot 裡套用 ufw 規則不可靠，實測會悄悄 fail-open，見 bootstrap-firewall.sh.j2 開頭說明；這支腳本讓使用者在 VM 真正開機後自己手動執行一次，才是能安全呼叫 ufw enable 的地方）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構
+    - name: "渲染 bootstrap-firewall.sh，放進 ISO 注入資料夾（late_command 在 d-i chroot 裡套用 ufw 規則不可靠，實測會悄悄 fail-open，見 bootstrap-firewall.sh.j2 開頭說明；這支腳本讓使用者在 VM 真正開機後自己手動執行一次，才是能安全呼叫 ufw enable 的地方）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構"
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/bootstrap/bootstrap-firewall.sh.j2"
         dest: "{{ preseed_bootstrap_output_dir }}/bootstrap-firewall.sh"
         mode: "0700"
 
-    - name: 把 custom/preseed_iso/srv/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 /srv 的結構，一次性全部搬過去，不用每個檔案各寫一個 task（包含 rootless_podman_user_setup.yml——這是 nginx-proxy-install.yml/harbor-install.yml 在 VM 上都要 include 的共用 task fragment，原始檔跟著這整棵 srv/ 樹放在 custom/preseed_iso/srv/ansible/playbook/ 底下，不是放在 custom/scripts/ 裡：custom/scripts/ 只放工作目錄（控制節點）自己會用到的東西，任何裝機過程會被複製進 VM 的檔案都該放進 custom/preseed_iso/）。裡面幾個 .j2 樣板檔案也會原封不動一起被搬過去，之後對應的渲染 task 會在同一個目錄下產生渲染好的同名（無 .j2）檔案，渲染完會有一個專門的清理 task 把這些用不到的 .j2 原始樣板刪掉（見下面「清掉 srv/ 底下還留著 .j2 副檔名的原始樣板」）。srv/nginx/certs/ 底下放了一個 .gitignore（憑證是裝機前才簽出來的執行期產物，不會有真正的靜態來源檔案，這份 .gitignore 本身也特意擋掉這個資料夾被意外塞進真正的憑證/私鑰），純粹是為了讓這個遞迴複製能順便建出這一層目錄，不用再額外開一個 task 專門 mkdir
+    - name: '把 custom/preseed_iso/srv/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 /srv 的結構，一次性全部搬過去，不用每個檔案各寫一個 task（包含 rootless_podman_user_setup.yml——這是 nginx-proxy-install.yml/harbor-install.yml 在 VM 上都要 include 的共用 task fragment，原始檔跟著這整棵 srv/ 樹放在 custom/preseed_iso/srv/ansible/playbook/ 底下，不是放在 custom/scripts/ 裡：custom/scripts/ 只放工作目錄（控制節點）自己會用到的東西，任何裝機過程會被複製進 VM 的檔案都該放進 custom/preseed_iso/）。裡面幾個 .j2 樣板檔案也會原封不動一起被搬過去，之後對應的渲染 task 會在同一個目錄下產生渲染好的同名（無 .j2）檔案，渲染完會有一個專門的清理 task 把這些用不到的 .j2 原始樣板刪掉（見下面「清掉 srv/ 底下還留著 .j2 副檔名的原始樣板」）。srv/nginx/certs/ 底下放了一個 .gitignore（憑證是裝機前才簽出來的執行期產物，不會有真正的靜態來源檔案，這份 .gitignore 本身也特意擋掉這個資料夾被意外塞進真正的憑證/私鑰），純粹是為了讓這個遞迴複製能順便建出這一層目錄，不用再額外開一個 task 專門 mkdir'
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/"
         dest: "{{ preseed_srv_output_dir }}/"
@@ -268,14 +268,14 @@
 
     - name: "nginx-proxy 是強制功能：CA 產生、設定檔渲染、安裝 playbook 複製進 ISO 注入資料夾"
       block:
-        - name: 產生 nginx-proxy 本地 CA 私鑰（直接生在 nginx_certs_dir 底下，若已存在則不重建）
+        - name: '產生 nginx-proxy 本地 CA 私鑰（直接生在 nginx_certs_dir 底下，若已存在則不重建）'
           community.crypto.openssl_privatekey:
             path: "{{ nginx_certs_dir }}/ca.key"
             type: RSA
             size: 4096
             mode: "0600"
 
-        - name: 產生 nginx-proxy CA 的 CSR（CA:TRUE，自簽用；CSR 只是中間產物，packaging 前會被清掉，不會留在 ISO 裡）
+        - name: '產生 nginx-proxy CA 的 CSR（CA:TRUE，自簽用；CSR 只是中間產物，packaging 前會被清掉，不會留在 ISO 裡）'
           community.crypto.openssl_csr:
             path: "{{ nginx_certs_dir }}/ca.csr"
             privatekey_path: "{{ nginx_certs_dir }}/ca.key"
@@ -289,7 +289,7 @@
               - cRLSign
             key_usage_critical: true
 
-        - name: 自簽 nginx-proxy CA 憑證（10 年，若已存在則不重建）
+        - name: '自簽 nginx-proxy CA 憑證（10 年，若已存在則不重建）'
           community.crypto.x509_certificate:
             path: "{{ nginx_certs_dir }}/ca.crt"
             privatekey_path: "{{ nginx_certs_dir }}/ca.key"
@@ -298,7 +298,7 @@
             selfsigned_not_after: "+3650d"
             mode: "0644"
 
-        - name: 渲染 nginx_proxy_runtime_vars.yml，放進 ISO 注入資料夾（nginx-proxy-install.yml 要用的少數幾個值）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構
+        - name: '渲染 nginx_proxy_runtime_vars.yml，放進 ISO 注入資料夾（nginx-proxy-install.yml 要用的少數幾個值）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構'
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/ansible/playbook/nginx_proxy_runtime_vars.yml.j2"
             dest: "{{ preseed_srv_output_dir }}/ansible/playbook/nginx_proxy_runtime_vars.yml"
@@ -306,14 +306,14 @@
 
     - name: "Harbor 相關檔案一律無條件烘焙進 ISO：leaf 憑證/vhost conf/設定檔產生、渲染、安裝 playbook 複製進 ISO 注入資料夾（裝不裝是 bootstrap-services 開機後才決定的事，不是這裡）"
       block:
-        - name: 產生 Harbor leaf 私鑰（直接生在 nginx_certs_dir 底下——這兩個檔案最終會進 /srv/nginx/certs/，不是 /srv/harbor/，Harbor 自己不碰 TLS；若已存在則不重建）
+        - name: '產生 Harbor leaf 私鑰（直接生在 nginx_certs_dir 底下——這兩個檔案最終會進 /srv/nginx/certs/，不是 /srv/harbor/，Harbor 自己不碰 TLS；若已存在則不重建）'
           community.crypto.openssl_privatekey:
             path: "{{ nginx_certs_dir }}/harbor.key"
             type: RSA
             size: 4096
             mode: "0640"
 
-        - name: 產生 Harbor leaf 憑證的 CSR（CN/SAN 是 harbor_hostname，不是 IP——nginx-proxy 用 hostname 分流，TLS 驗證看的是這個名字，不是 Harbor 自己的位址；CSR 只是中間產物，packaging 前會被清掉）
+        - name: '產生 Harbor leaf 憑證的 CSR（CN/SAN 是 harbor_hostname，不是 IP——nginx-proxy 用 hostname 分流，TLS 驗證看的是這個名字，不是 Harbor 自己的位址；CSR 只是中間產物，packaging 前會被清掉）'
           community.crypto.openssl_csr:
             path: "{{ nginx_certs_dir }}/harbor.csr"
             privatekey_path: "{{ nginx_certs_dir }}/harbor.key"
@@ -328,7 +328,7 @@
             extended_key_usage:
               - serverAuth
 
-        - name: 用 nginx-proxy CA 簽發 Harbor leaf 憑證（825 天，每次重跑都重簽——跟 lg-laravel 那套的慣例一致：換 leaf 不換 CA）
+        - name: '用 nginx-proxy CA 簽發 Harbor leaf 憑證（825 天，每次重跑都重簽——跟 lg-laravel 那套的慣例一致：換 leaf 不換 CA）'
           community.crypto.x509_certificate:
             path: "{{ nginx_certs_dir }}/harbor.crt"
             csr_path: "{{ nginx_certs_dir }}/harbor.csr"
@@ -338,25 +338,25 @@
             ownca_not_after: "+825d"
             mode: "0644"
 
-        - name: 渲染 harbor.conf（nginx-proxy 後面 Harbor 的 vhost 設定），放進 ISO 注入資料夾——放進 preseed_srv_output_dir/nginx/conf.d/，直接對齊最終 /srv/nginx/conf.d/ 的結構
+        - name: '渲染 harbor.conf（nginx-proxy 後面 Harbor 的 vhost 設定），放進 ISO 注入資料夾——放進 preseed_srv_output_dir/nginx/conf.d/，直接對齊最終 /srv/nginx/conf.d/ 的結構'
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/nginx/conf.d/harbor.conf.j2"
             dest: "{{ preseed_srv_output_dir }}/nginx/conf.d/harbor.conf"
             mode: "0644"
 
-        - name: 渲染 harbor.yml，放進 ISO 注入資料夾（跟 wg0.conf/preseed.cfg 同一套做法——密碼/位址這些值裝機前在控制節點就全部知道，不用等 VM 開機後才現場組設定檔）——放進 preseed_srv_output_dir/harbor/，直接對齊最終 /srv/harbor/ 的結構
+        - name: '渲染 harbor.yml，放進 ISO 注入資料夾（跟 wg0.conf/preseed.cfg 同一套做法——密碼/位址這些值裝機前在控制節點就全部知道，不用等 VM 開機後才現場組設定檔）——放進 preseed_srv_output_dir/harbor/，直接對齊最終 /srv/harbor/ 的結構'
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/harbor/harbor.yml.j2"
             dest: "{{ preseed_srv_output_dir }}/harbor/harbor.yml"
             mode: "0640"
 
-        - name: 渲染 harbor_runtime_vars.yml，放進 ISO 注入資料夾（VM 上那支 harbor-install.yml playbook 要用的少數幾個值——admin 密碼、port 這種——不用回頭解析 harbor.yml 才拿得到）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構
+        - name: '渲染 harbor_runtime_vars.yml，放進 ISO 注入資料夾（VM 上那支 harbor-install.yml playbook 要用的少數幾個值——admin 密碼、port 這種——不用回頭解析 harbor.yml 才拿得到）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構'
           ansible.builtin.template:
             src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/ansible/playbook/harbor_runtime_vars.yml.j2"
             dest: "{{ preseed_srv_output_dir }}/ansible/playbook/harbor_runtime_vars.yml"
             mode: "0600"
 
-    - name: 找出 nginx/certs/ 裡面不是正式憑證/私鑰的東西（CA 自己的私鑰、兩份 CSR 中間產物、拿來佔位建目錄用的 .gitignore）——範圍只限定在這個資料夾，不是整個 srv/ 都搜
+    - name: '找出 nginx/certs/ 裡面不是正式憑證/私鑰的東西（CA 自己的私鑰、兩份 CSR 中間產物、拿來佔位建目錄用的 .gitignore）——範圍只限定在這個資料夾，不是整個 srv/ 都搜'
       ansible.builtin.find:
         paths: "{{ preseed_srv_output_dir }}/nginx/certs"
         excludes:
@@ -366,7 +366,7 @@
         hidden: true
       register: nginx_certs_cruft_files
 
-    - name: 清掉上面找到的這些檔案
+    - name: '清掉上面找到的這些檔案'
       ansible.builtin.file:
         path: "{{ item.path }}"
         state: absent
@@ -374,7 +374,7 @@
       loop_control:
         label: "{{ item.path }}"
 
-    - name: 清掉 srv/ 底下還留著 .j2 副檔名的原始樣板（上面「把整個 srv/ 資料夾放進 ISO 注入資料夾」那個 task 連這幾支樣板原始檔也一起搬過來了，這裡已經各自渲染出同名、無 .j2 的正式檔案，原始樣板留著沒用、還可能被誤會成真正在用的設定檔）
+    - name: '清掉 srv/ 底下還留著 .j2 副檔名的原始樣板（上面「把整個 srv/ 資料夾放進 ISO 注入資料夾」那個 task 連這幾支樣板原始檔也一起搬過來了，這裡已經各自渲染出同名、無 .j2 的正式檔案，原始樣板留著沒用、還可能被誤會成真正在用的設定檔）'
       ansible.builtin.file:
         path: "{{ preseed_srv_output_dir }}/{{ item }}"
         state: absent
@@ -384,7 +384,7 @@
         - harbor/harbor.yml.j2
         - ansible/playbook/harbor_runtime_vars.yml.j2
 
-    - name: 編譯 bootstrap-services（VM 開機後使用者自己手動執行的互動表單，見 custom/scripts/bootstrap-services/main.go 開頭說明；go run 不適用，道理跟 bootstrap-sudo 一樣——這支要跑在 VM 上，VM 不會有 Go 工具鏈）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構
+    - name: "編譯 bootstrap-services（VM 開機後使用者自己手動執行的互動表單，見 custom/scripts/bootstrap-services/main.go 開頭說明；go run 不適用，道理跟 bootstrap-sudo 一樣——這支要跑在 VM 上，VM 不會有 Go 工具鏈）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構"
       ansible.builtin.command:
         cmd: go build -o {{ preseed_bootstrap_output_dir }}/bootstrap-services .
         chdir: "{{ playbook_dir }}/../../custom/scripts/bootstrap-services"
@@ -394,13 +394,13 @@
         GOARCH: amd64
       changed_when: true
 
-    - name: 把 bootstrap-services 表單問完之後真正做事的那組 shell script（apply.sh/harbor.sh/nginx.sh，不是樣板、原封不動複製）整個資料夾放進 ISO 注入資料夾——放進 preseed_bootstrap_output_dir/services/，工作目錄的來源路徑直接對齊最終 ~{{ vm_user }}/bootstrap/services/ 的結構
+    - name: "把 bootstrap-services 表單問完之後真正做事的那組 shell script（apply.sh/harbor.sh/nginx.sh，不是樣板、原封不動複製）整個資料夾放進 ISO 注入資料夾——放進 preseed_bootstrap_output_dir/services/，工作目錄的來源路徑直接對齊最終 ~{{ vm_user }}/bootstrap/services/ 的結構"
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/bootstrap/services/"
         dest: "{{ preseed_bootstrap_output_dir }}/services/"
         mode: "0700"
 
-    - name: 渲染 preseed.cfg
+    - name: '渲染 preseed.cfg'
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/template/preseed.cfg.j2"
         dest: "{{ preseed_output_dir }}/preseed.cfg"
@@ -410,7 +410,7 @@
         ssh_public_key: "{{ (ssh_public_key_raw.content | b64decode).strip() }}"
         ssh_port: "{{ vm_ssh_port }}"
 
-    - name: 重新封裝 ISO，塞入 preseed.cfg、host key 並改開機參數
+    - name: '重新封裝 ISO，塞入 preseed.cfg、host key 並改開機參數'
       ansible.builtin.command:
         cmd: >
           {{ remaster_iso_script }}
@@ -420,13 +420,13 @@
       args:
         creates: "{{ preseed_output_iso }}"
 
-    - name: 渲染 .vmx
+    - name: '渲染 .vmx'
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/template/debian.vmx.j2"
         dest: "{{ vmx_output_path }}"
         mode: "0600"
 
-    - name: 確保 hypervisor datastore 上的 VM 資料夾存在
+    - name: '確保 hypervisor datastore 上的 VM 資料夾存在'
       ansible.builtin.command:
         cmd: >
           sshpass -e ssh {{ ssh_opts }}
@@ -436,7 +436,7 @@
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
 
-    - name: 把重新封裝好的 ISO 上傳到 datastore
+    - name: '把重新封裝好的 ISO 上傳到 datastore'
       ansible.builtin.command:
         cmd: >
           sshpass -e scp {{ ssh_opts }}
@@ -446,7 +446,7 @@
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
 
-    - name: 把 .vmx 上傳到 datastore
+    - name: '把 .vmx 上傳到 datastore'
       ansible.builtin.command:
         cmd: >
           sshpass -e scp {{ ssh_opts }}
@@ -456,7 +456,7 @@
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
 
-    - name: 用 vmkfstools 建立系統碟
+    - name: '用 vmkfstools 建立系統碟'
       ansible.builtin.command:
         cmd: >
           sshpass -e ssh {{ ssh_opts }}
@@ -466,7 +466,7 @@
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
 
-    - name: 用 vmkfstools 建立資料碟
+    - name: '用 vmkfstools 建立資料碟'
       ansible.builtin.command:
         cmd: >
           sshpass -e ssh {{ ssh_opts }}
@@ -476,7 +476,7 @@
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
 
-    - name: 用 vmkfstools 建立 Harbor 專屬資料碟（無條件建立，見上面 vm_disk_harbor_gb 的說明）
+    - name: '用 vmkfstools 建立 Harbor 專屬資料碟（無條件建立，見上面 vm_disk_harbor_gb 的說明）'
       ansible.builtin.command:
         cmd: >
           sshpass -e ssh {{ ssh_opts }}
@@ -486,7 +486,7 @@
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
 
-    - name: 印出後續手動步驟需要的資訊
+    - name: '印出後續手動步驟需要的資訊'
       ansible.builtin.debug:
         msg:
           - "VM 相關檔案都已經上傳完成，接下來要手動做（這幾步是 ESXi Host Client 專屬操作，換平台要重寫）："
@@ -496,7 +496,7 @@
           - "4. 跑 task add-peer——把目前這台機器加進 WireGuard、接通隧道、順便把 known_hosts 跟 SSH 私鑰準備好（VM 的 LAN IP 就是這時候用）"
           - "5. 接通之後，SSH 連線固定走 WireGuard 位址 {{ wireguard_vm_address }}，不是 VM 的 LAN IP——連線細節看 task add-peer 跑完印出的提示"
 
-    - name: 印出 bootstrap-services 的後續資訊
+    - name: '印出 bootstrap-services 的後續資訊'
       ansible.builtin.debug:
         msg:
           - "6. VM 開機、SSH 進去之後，跑 sudo ~/bootstrap/bootstrap-services——互動問要不要在本機裝 Harbor（還是接一個已經存在的外部 Harbor），裝好/接上之後才會接著裝 nginx-proxy（nginx-proxy 本身是強制功能，但要等這支程式把 Harbor 這塊決定完才會真的執行安裝，這樣 nginx-proxy 自己要拉的 image 才吃得到 Harbor 的 pull-through cache）。"

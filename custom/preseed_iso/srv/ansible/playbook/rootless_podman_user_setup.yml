@@ -13,26 +13,26 @@
 # （XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS/HOME，掛在後面所有要以這個
 # 使用者身份跑 podman/podman-compose/systemctl --user 的 task 的 environment: 上）
 
-- name: 建立 {{ rootless_user_name }} 這個 rootless 專屬系統使用者
+- name: "建立 {{ rootless_user_name }} 這個 rootless 專屬系統使用者"
   ansible.builtin.user:
     name: "{{ rootless_user_name }}"
     system: true
     shell: /usr/sbin/nologin
     create_home: true
 
-- name: 檢查 {{ rootless_user_name }} 使用者有沒有 subuid 條目
+- name: "檢查 {{ rootless_user_name }} 使用者有沒有 subuid 條目"
   ansible.builtin.command: grep -q "^{{ rootless_user_name }}:" /etc/subuid
   register: rootless_subuid_check
   changed_when: false
   failed_when: false
 
-- name: 檢查 {{ rootless_user_name }} 使用者有沒有 subgid 條目
+- name: "檢查 {{ rootless_user_name }} 使用者有沒有 subgid 條目"
   ansible.builtin.command: grep -q "^{{ rootless_user_name }}:" /etc/subgid
   register: rootless_subgid_check
   changed_when: false
   failed_when: false
 
-- name: 補 subuid/subgid（Debian 的 useradd 不一定會自動配，rootless podman 的 user namespace 映射需要這個）
+- name: '補 subuid/subgid（Debian 的 useradd 不一定會自動配，rootless podman 的 user namespace 映射需要這個）'
   ansible.builtin.shell: |
     set -euo pipefail
     NEXT=$(awk -F: 'BEGIN{m=100000}{e=$2+$3; if(e>m)m=e}END{print m}' /etc/subuid)
@@ -42,16 +42,16 @@
   when: rootless_subuid_check.rc != 0 or rootless_subgid_check.rc != 0
   changed_when: true
 
-- name: 開 linger（{{ rootless_user_name }} 的 systemd user instance 開機自動起，rootless service 要用；podman info/systemctl --user 都要靠 /run/user/<uid> 存在）
+- name: "開 linger（{{ rootless_user_name }} 的 systemd user instance 開機自動起，rootless service 要用；podman info/systemctl --user 都要靠 /run/user/<uid> 存在）"
   ansible.builtin.command: loginctl enable-linger {{ rootless_user_name }}
   changed_when: true
 
-- name: 查 {{ rootless_user_name }} 使用者的 uid（組 XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS 要用）
+- name: "查 {{ rootless_user_name }} 使用者的 uid（組 XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS 要用）"
   ansible.builtin.getent:
     database: passwd
     key: "{{ rootless_user_name }}"
 
-- name: 組 rootless 執行環境變數，後面所有要以 {{ rootless_user_name }} 身份跑的 task 都掛這個
+- name: "組 rootless 執行環境變數，後面所有要以 {{ rootless_user_name }} 身份跑的 task 都掛這個"
   ansible.builtin.set_fact:
     rootless_podman_env:
       XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[rootless_user_name][1] }}"
@@ -64,7 +64,7 @@
       # 自己的說明），不是每個使用者自己的 ~/.config/containers/auth.json。
       REGISTRY_AUTH_FILE: /etc/containers/mirror-auth.json
 
-- name: 服務目錄（chown 給 {{ rootless_user_name }}，遞迴——late_command 裝機當下已經把設定檔/憑證這些東西直接放進最終位置了（不是先放暫存資料夾、裝好再搬），這些目錄第一次被這個 task 碰到的時候裡面可能已經有 root 擁有的檔案，recurse: true 才能把裡面現有的東西一起改成這個使用者）
+- name: "服務目錄（chown 給 {{ rootless_user_name }}，遞迴——late_command 裝機當下已經把設定檔/憑證這些東西直接放進最終位置了（不是先放暫存資料夾、裝好再搬），這些目錄第一次被這個 task 碰到的時候裡面可能已經有 root 擁有的檔案，recurse: true 才能把裡面現有的東西一起改成這個使用者）"
   ansible.builtin.file:
     path: "{{ item }}"
     state: directory
@@ -74,7 +74,7 @@
     recurse: true
   loop: "{{ rootless_service_dirs }}"
 
-- name: 驗證 rootless podman 能動（確保後面的步驟不會卡在 linger/subuid 沒生效）
+- name: '驗證 rootless podman 能動（確保後面的步驟不會卡在 linger/subuid 沒生效）'
   ansible.builtin.command: podman info
   become: true
   become_user: "{{ rootless_user_name }}"

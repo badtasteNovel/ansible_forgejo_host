@@ -30,7 +30,7 @@
 # custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著
 # 整棵 srv/ 樹一起搬過去，不用額外的複製 task）。
 
-- name: 在 VM 上把 Harbor pull-through cache 鏡像站架起來（podman-compose，rootless）
+- name: '在 VM 上把 Harbor pull-through cache 鏡像站架起來（podman-compose，rootless）'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -64,7 +64,7 @@
   tasks:
     # ────────────────────────── rootless 使用者 ──────────────────────────
 
-    - name: 建立 harbor 這個 rootless 專屬系統使用者
+    - name: '建立 harbor 這個 rootless 專屬系統使用者'
       ansible.builtin.include_tasks:
         file: /srv/ansible/playbook/rootless_podman_user_setup.yml # 原始檔是 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著整棵 srv/ 樹裝機前由 control-panel/debian.yml 複製進 ISO——跟 nginx-proxy-install.yml 共用同一份
       vars:
@@ -84,31 +84,31 @@
     # 其他檔案更嚴格一點——裡面有 harbor_admin_password/database.password
     # 明文密碼。
 
-    - name: 收緊 harbor.yml 的權限（裡面有明文密碼，不該跟目錄裡其他檔案一樣寬）
+    - name: '收緊 harbor.yml 的權限（裡面有明文密碼，不該跟目錄裡其他檔案一樣寬）'
       ansible.builtin.file:
         path: "{{ harbor_home }}/harbor.yml"
         mode: "0640"
 
     # ────────────────────────── 下載／校驗 offline installer ──────────────────────────
 
-    - name: 查詢 GitHub release 上這個版本 installer 的官方 sha256（digest 欄位）
+    - name: '查詢 GitHub release 上這個版本 installer 的官方 sha256（digest 欄位）'
       ansible.builtin.uri:
         url: "https://api.github.com/repos/goharbor/harbor/releases/tags/{{ harbor_version }}"
         return_content: true
       register: harbor_release_info
 
-    - name: 算出 installer tgz 的官方 digest
+    - name: '算出 installer tgz 的官方 digest'
       ansible.builtin.set_fact:
         harbor_tgz_digest: "{{ harbor_release_info.json.assets | selectattr('name', 'equalto', harbor_tgz_name) | map(attribute='digest') | first }}"
 
-    - name: 擋下「GitHub API 查不到這個版本/這個檔名」的情況（digest 查不到，後面下載也沒有東西可以校驗，不該悶著頭繼續）
+    - name: '擋下「GitHub API 查不到這個版本/這個檔名」的情況（digest 查不到，後面下載也沒有東西可以校驗，不該悶著頭繼續）'
       ansible.builtin.assert:
         that:
           - harbor_tgz_digest is defined
           - harbor_tgz_digest | length > 0
         fail_msg: "GitHub release {{ harbor_version }} 裡找不到 {{ harbor_tgz_name }} 的官方 sha256，中止安裝（可能是版本號打錯，或 GitHub API 被限流）"
 
-    - name: 下載 Harbor offline installer（已快取就跳過；get_url 本身會校驗 checksum，對不上直接失敗，不會留下半調子的檔案）
+    - name: '下載 Harbor offline installer（已快取就跳過；get_url 本身會校驗 checksum，對不上直接失敗，不會留下半調子的檔案）'
       ansible.builtin.get_url:
         url: "https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}/{{ harbor_tgz_name }}"
         dest: "{{ harbor_tgz_cached_path }}"
@@ -118,7 +118,7 @@
         mode: "0644"
         timeout: 300
 
-    - name: 解壓 bundle 到 {{ harbor_home }}（對應 tar --strip-components=1，installer tgz 裡面多包了一層目錄）
+    - name: "解壓 bundle 到 {{ harbor_home }}（對應 tar --strip-components=1，installer tgz 裡面多包了一層目錄）"
       ansible.builtin.unarchive:
         src: "{{ harbor_tgz_cached_path }}"
         dest: "{{ harbor_home }}"
@@ -128,7 +128,7 @@
         extra_opts:
           - --strip-components=1
 
-    - name: podman load image bundle（進 harbor 使用者的 image store）
+    - name: 'podman load image bundle（進 harbor 使用者的 image store）'
       ansible.builtin.command: podman load -i {{ harbor_home }}/harbor.{{ harbor_version }}.tar.gz
       become: true
       become_user: "{{ harbor_user }}"
@@ -137,7 +137,7 @@
 
     # ────────────────────────── prepare → 起服務 ──────────────────────────
 
-    - name: 建 common/config（goharbor/prepare 要寫進去的設定目錄）
+    - name: '建 common/config（goharbor/prepare 要寫進去的設定目錄）'
       ansible.builtin.file:
         path: "{{ harbor_home }}/common/config"
         state: directory
@@ -145,7 +145,7 @@
         group: "{{ harbor_user }}"
         mode: "0750"
 
-    - name: 跑 goharbor/prepare（產生 docker-compose.yml + common/config/*；--privileged 只在 user namespace 內有效，不是真的拿到主機 root）
+    - name: '跑 goharbor/prepare（產生 docker-compose.yml + common/config/*；--privileged 只在 user namespace 內有效，不是真的拿到主機 root）'
       ansible.builtin.command: >
         podman run --rm --privileged --pull=never
         -v {{ harbor_home }}:/input:z
@@ -159,7 +159,7 @@
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: 移除 prepare 產出 docker-compose.yml 裡的 log service（image 內部用 sudo 切使用者，rootless 下讀不到 /etc/shadow 會 crash-loop；log 改走 journald），並把 proxy service 對外發布的埠限制在 127.0.0.1（Harbor 自己完全不對外，nginx-proxy 用 --network=host 連這個 loopback 埠，外部摸不到）
+    - name: '移除 prepare 產出 docker-compose.yml 裡的 log service（image 內部用 sudo 切使用者，rootless 下讀不到 /etc/shadow 會 crash-loop；log 改走 journald），並把 proxy service 對外發布的埠限制在 127.0.0.1（Harbor 自己完全不對外，nginx-proxy 用 --network=host 連這個 loopback 埠，外部摸不到）'
       ansible.builtin.command: >
         yq -i '
           del(.services.log)
@@ -172,21 +172,21 @@
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: podman-compose up -d
+    - name: 'podman-compose up -d'
       ansible.builtin.command: podman-compose -f {{ harbor_home }}/docker-compose.yml up -d
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: 查 podman-compose 的絕對路徑（systemd unit 的 ExecStart 要用絕對路徑，不能依賴 PATH）
+    - name: '查 podman-compose 的絕對路徑（systemd unit 的 ExecStart 要用絕對路徑，不能依賴 PATH）'
       ansible.builtin.command: command -v podman-compose
       args:
         executable: /bin/bash
       changed_when: false
       register: harbor_podman_compose_path
 
-    - name: 建 ~harbor/.config/systemd/user/（daemon-reload 前要先有目錄）
+    - name: '建 ~harbor/.config/systemd/user/（daemon-reload 前要先有目錄）'
       ansible.builtin.file:
         path: "/home/{{ harbor_user }}/.config/systemd/user"
         state: directory
@@ -194,7 +194,7 @@
         group: "{{ harbor_user }}"
         mode: "0750"
 
-    - name: 裝 systemd **user** unit（~harbor/.config/systemd/user，靠 linger 開機自動起）
+    - name: '裝 systemd **user** unit（~harbor/.config/systemd/user，靠 linger 開機自動起）'
       ansible.builtin.copy:
         dest: "/home/{{ harbor_user }}/.config/systemd/user/harbor.service"
         owner: "{{ harbor_user }}"
@@ -219,7 +219,7 @@
           [Install]
           WantedBy=default.target
 
-    - name: systemctl --user daemon-reload + enable harbor.service
+    - name: 'systemctl --user daemon-reload + enable harbor.service'
       ansible.builtin.command: "{{ item }}"
       become: true
       become_user: "{{ harbor_user }}"
@@ -229,7 +229,7 @@
         - systemctl --user daemon-reload
         - systemctl --user enable harbor.service
 
-    - name: 等 Harbor API healthy
+    - name: '等 Harbor API healthy'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/health"
         status_code: 200
@@ -240,7 +240,7 @@
 
     # ────────────────────────── proxy-cache：上游 endpoint + project + robot 帳號 + GC 排程 ──────────────────────────
 
-    - name: 列出目前已有的 registry endpoint
+    - name: '列出目前已有的 registry endpoint'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/registries"
         url_username: admin
@@ -248,7 +248,7 @@
         force_basic_auth: true
       register: harbor_existing_registries
 
-    - name: 列出目前已有的 project
+    - name: '列出目前已有的 project'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/projects?page_size=100"
         url_username: admin
@@ -256,7 +256,7 @@
         force_basic_auth: true
       register: harbor_existing_projects
 
-    - name: 補上 PROXY_MAP 裡還沒建的 registry endpoint
+    - name: '補上 PROXY_MAP 裡還沒建的 registry endpoint'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/registries"
         method: POST
@@ -275,7 +275,7 @@
         label: "{{ item.name }}"
       when: harbor_existing_registries.json | selectattr('name', 'equalto', item.name) | list | length == 0
 
-    - name: 重新查一次 registry endpoint（剛建立的要拿到 id 才能建對應的 project）
+    - name: '重新查一次 registry endpoint（剛建立的要拿到 id 才能建對應的 project）'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/registries"
         url_username: admin
@@ -283,7 +283,7 @@
         force_basic_auth: true
       register: harbor_registries_after_create
 
-    - name: 補上 PROXY_MAP 裡還沒建的 proxy-cache project（quota = harbor_project_quota_bytes）
+    - name: '補上 PROXY_MAP 裡還沒建的 proxy-cache project（quota = harbor_project_quota_bytes）'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/projects"
         method: POST
@@ -304,7 +304,7 @@
         label: "{{ item.project }}"
       when: harbor_existing_projects.json | selectattr('name', 'equalto', item.project) | list | length == 0
 
-    - name: 系統預設 project quota（之後新建的 project 自動套用同一個 quota）
+    - name: '系統預設 project quota（之後新建的 project 自動套用同一個 quota）'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/configurations"
         method: PUT
@@ -316,7 +316,7 @@
           storage_per_project: "{{ harbor_project_quota_bytes }}"
         status_code: [200]
 
-    - name: 查有沒有既有的 system-level robot 帳號（system robot 不能用 API 改權限，一律刪了重建，帶最新的 PROXY_MAP project 清單）
+    - name: '查有沒有既有的 system-level robot 帳號（system robot 不能用 API 改權限，一律刪了重建，帶最新的 PROXY_MAP project 清單）'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/robots?page_size=100"
         url_username: admin
@@ -324,7 +324,7 @@
         force_basic_auth: true
       register: harbor_existing_robots
 
-    - name: 刪掉既有的 robot 帳號（如果有）
+    - name: '刪掉既有的 robot 帳號（如果有）'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/robots/{{ (harbor_existing_robots.json | selectattr('name', 'equalto', 'robot$' + robot_name) | first).id }}"
         method: DELETE
@@ -334,7 +334,7 @@
         status_code: [200, 204]
       when: harbor_existing_robots.json | selectattr('name', 'equalto', 'robot$' + robot_name) | list | length > 0
 
-    - name: 組 robot 帳號的權限清單——每個 proxy project 一組固定的 access（pull + 非破壞性的 list/read，不給 delete）
+    - name: '組 robot 帳號的權限清單——每個 proxy project 一組固定的 access（pull + 非破壞性的 list/read，不給 delete）'
       ansible.builtin.set_fact:
         robot_permissions: "{{ robot_permissions | default([]) + [{
           'kind': 'project',
@@ -351,7 +351,7 @@
       loop_control:
         label: "{{ item.project }}"
 
-    - name: 建 robot 拉取帳號（每個 proxy project 的 pull + 非破壞性的 list/read，給 buildah/podman/containerd 拉圖用）
+    - name: '建 robot 拉取帳號（每個 proxy project 的 pull + 非破壞性的 list/read，給 buildah/podman/containerd 拉圖用）'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/robots"
         method: POST
@@ -369,7 +369,7 @@
         status_code: [201]
       register: harbor_robot_create
 
-    - name: 確保 {{ harbor_secrets_dir }} 存在（ansible.builtin.copy 不會自動建缺少的上層目錄，下面那個 task 沒有這行會直接失敗）
+    - name: "確保 {{ harbor_secrets_dir }} 存在（ansible.builtin.copy 不會自動建缺少的上層目錄，下面那個 task 沒有這行會直接失敗）"
       ansible.builtin.file:
         path: "{{ harbor_secrets_dir }}"
         state: directory
@@ -377,7 +377,7 @@
         group: root
         mode: "0700"
 
-    - name: 把 robot 帳號的名稱/secret 存進本機檔案（root-only 可讀；跟這個專案 custom/.env 明文存機密的風格一致，見開頭說明）
+    - name: '把 robot 帳號的名稱/secret 存進本機檔案（root-only 可讀；跟這個專案 custom/.env 明文存機密的風格一致，見開頭說明）'
       ansible.builtin.copy:
         dest: "{{ harbor_secrets_dir }}/{{ item.name }}"
         content: "{{ item.content }}"
@@ -389,7 +389,7 @@
         - { name: robot-secret, content: "{{ harbor_robot_create.json.secret }}" }
       no_log: true
 
-    - name: 每週日 04:00 GC 排程（只回收 orphan blob，不刪 untagged manifest——digest-pull 的 base image 常態無 tag，刪 untagged 會每週整批清掉造成週期性 cache miss）
+    - name: '每週日 04:00 GC 排程（只回收 orphan blob，不刪 untagged manifest——digest-pull 的 base image 常態無 tag，刪 untagged 會每週整批清掉造成週期性 cache miss）'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/system/gc/schedule"
         method: PUT
@@ -406,7 +406,7 @@
         status_code: [200, 404]
       register: harbor_gc_put
 
-    - name: GC 排程第一次建立（PUT 回 404 代表還沒有排程可以更新，改用 POST 新建）
+    - name: 'GC 排程第一次建立（PUT 回 404 代表還沒有排程可以更新，改用 POST 新建）'
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/system/gc/schedule"
         method: POST
@@ -425,7 +425,7 @@
 
     # ────────────────────────── 收尾 ──────────────────────────
 
-    - name: 清掉這支 playbook 自己用過的一次性檔案（harbor_runtime_vars.yml 裡有明文密碼，用完就刪；harbor-install.yml 自己也是一次性的，裝完就沒用了）
+    - name: '清掉這支 playbook 自己用過的一次性檔案（harbor_runtime_vars.yml 裡有明文密碼，用完就刪；harbor-install.yml 自己也是一次性的，裝完就沒用了）'
       ansible.builtin.file:
         path: "/srv/ansible/playbook/{{ item }}"
         state: absent
@@ -433,7 +433,7 @@
         - harbor_runtime_vars.yml
         - harbor-install.yml
 
-    - name: 印出結果（journalctl -u bootstrap-harbor 看得到這段）
+    - name: '印出結果（journalctl -u bootstrap-harbor 看得到這段）'
       ansible.builtin.debug:
         msg:
           - "Harbor 已就緒：https://{{ harbor_hostname }}:{{ nginx_proxy_https_port }}（透過 nginx-proxy 連，不是 harbor_internal_http_port）"

@@ -26,20 +26,20 @@
 # 能連得上（金鑰認證失敗會自動退回密碼認證，見 group_vars/windows.yml 開頭
 # 說明），只是代表 network.yml 還沒跑過，不是這支 playbook 本身的問題。
 
-- name: 讀取 custom/.env，準備好 SSH 連線的密碼備援
+- name: '讀取 custom/.env，準備好 SSH 連線的密碼備援'
   hosts: localhost
   connection: local
   gather_facts: false
   tasks:
-    - name: 載入 custom/.env
+    - name: '載入 custom/.env'
       ansible.builtin.include_tasks:
         file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/load_env.yml"
       vars:
         dotenv_path: "{{ playbook_dir }}/../../custom/.env"
 
-- name: 測試 SSH 連線（win_ping）
+- name: '測試 SSH 連線（win_ping）'
   hosts: windows
   gather_facts: false
   tasks:
-    - name: win_ping
+    - name: 'win_ping'
       ansible.windows.win_ping:

@@ -7,13 +7,29 @@
 # 這個互動程式用子行程方式呼叫，輸出要直接灌進同一個終端機，不需要、也不能
 # 跳出 ansible-navigator 自己的全螢幕介面。
 #
-# execution-environment 的 volume-mounts 把 VM 主機的 /etc、/home、/run、
-# /var/lib、/var/cache、/opt、/usr/local/share/ca-certificates 原封不動掛進
-# 容器同一個路徑——這兩支 playbook 要做 useradd、寫 systemd unit、改
-# /etc/subuid、操作 rootless podman 的儲存層，這些都是會動到 VM 主機真實
-# 狀態的操作，不是容器自己關起門來的事。--privileged --pid=host 讓容器裡的
-# systemctl 真的能透過掛進來的 /run/systemd socket 跟 VM 主機的 systemd 講話。
+# execution-environment 的 volume-mounts 把 VM 主機的 /etc、/run、/var/lib、
+# /var/cache、/usr/local/share/ca-certificates 原封不動掛進容器同一個
+# 路徑——這兩支 playbook 要做 useradd、寫 systemd unit、改 /etc/subuid、
+# 操作 rootless podman 的儲存層，這些都是會動到 VM 主機真實狀態的操作，
+# 不是容器自己關起門來的事。--privileged --pid=host 讓容器裡的 systemctl
+# 真的能透過掛進來的 /run/systemd socket 跟 VM 主機的 systemd 講話。
 # 這塊設定沒有實機驗證過，見 execution-environment.yml 開頭的說明。
+#
+# 故意不掛 /opt：這兩支 playbook 完全沒有任何地方碰 /opt（這個專案本來就
+# 刻意不用 /opt 放自己的東西，一律改放 /srv/<name>，見 CLAUDE.md），掛了
+# 反而會出事——ansible-builder 建出來的 EE image，自己內建的 entrypoint
+# 腳本就放在 image 裡的 /opt/builder/bin/entrypoint，掛 VM host 的 /opt
+# 進去會直接蓋掉它，容器連 entrypoint 都找不到（實機撞過 crun: executable
+# file '/opt/builder/bin/entrypoint' not found）。
+#
+# /home 不能整個掛：ansible-runner 自己有一道安全檢查，擋掉 "/"、"/home"、
+# "/usr" 這三個完整路徑的掛載（實機撞過
+# ansible_runner.exceptions.ConfigurationError: cannot mount '/' or '/home'
+# or '/usr'）。這兩支 playbook 真正需要寫進 /home 底下的只有 harbor_user/
+# nginx_proxy_user 這兩個 rootless 系統使用者各自的 home（寫
+# ~/.config/systemd/user/*.service），兩個使用者名稱都是 control-panel/
+# debian.yml 寫死的常數（harbor / nginx-proxy，不是裝機時可改的輸入值），
+# 所以直接掛這兩條具體路徑，不用掛整個 /home。
 ansible-navigator:
   mode: stdout
   execution-environment:
@@ -30,8 +46,11 @@ ansible-navigator:
       - src: /etc
         dest: /etc
         options: rw
-      - src: /home
-        dest: /home
+      - src: /home/harbor
+        dest: /home/harbor
+        options: rw
+      - src: /home/nginx-proxy
+        dest: /home/nginx-proxy
         options: rw
       - src: /run
         dest: /run
@@ -41,9 +60,6 @@ ansible-navigator:
         options: rw
       - src: /var/cache
         dest: /var/cache
-        options: rw
-      - src: /opt
-        dest: /opt
         options: rw
       - src: /usr/local/share/ca-certificates
         dest: /usr/local/share/ca-certificates

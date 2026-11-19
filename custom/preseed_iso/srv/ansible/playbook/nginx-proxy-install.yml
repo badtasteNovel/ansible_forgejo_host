@@ -37,7 +37,7 @@
 # 不能只寫埠號（host network 下不寫位址會變成監聽主機所有介面，等於繞過
 # sshd 那種「只綁 WireGuard 位址」的既有慣例）。
 
-- name: 在 VM 上把 nginx 反代架起來（podman，rootless，TLS 集中終止）
+- name: '在 VM 上把 nginx 反代架起來（podman，rootless，TLS 集中終止）'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -54,7 +54,7 @@
   tasks:
     # ────────────────────────── rootless 使用者 ──────────────────────────
 
-    - name: 建立 nginx-proxy 這個 rootless 專屬系統使用者
+    - name: '建立 nginx-proxy 這個 rootless 專屬系統使用者'
       ansible.builtin.include_tasks:
         file: /srv/ansible/playbook/rootless_podman_user_setup.yml # 原始檔是 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著整棵 srv/ 樹裝機前由 control-panel/debian.yml 複製進 ISO——這支 playbook 跑在 VM 上，摸不到控制節點的 repo，只能吃注入進來的這份
       vars:
@@ -71,7 +71,7 @@
     # 這個 rootless 專屬系統使用者」那步的 recurse: true chown 處理掉了，這裡
     # 不需要再搬一次。
 
-    - name: 把 CA 灌進系統信任庫（這台機器上的 podman/buildah/curl 要信任自己這個 nginx 簽出來的憑證——以後這台 VM 當 k3s host 時，本機自己 pull 自己背後的服務也要用到）
+    - name: '把 CA 灌進系統信任庫（這台機器上的 podman/buildah/curl 要信任自己這個 nginx 簽出來的憑證——以後這台 VM 當 k3s host 時，本機自己 pull 自己背後的服務也要用到）'
       ansible.builtin.copy:
         src: "{{ nginx_proxy_cert_dir }}/ca.crt"
         dest: /usr/local/share/ca-certificates/nginx-proxy-ca.crt
@@ -79,21 +79,21 @@
         mode: "0644"
       register: ca_trust_copy
 
-    - name: update-ca-certificates（只有真的換了 CA 才需要重跑）
+    - name: 'update-ca-certificates（只有真的換了 CA 才需要重跑）'
       ansible.builtin.command: update-ca-certificates
       when: ca_trust_copy is changed
       changed_when: true
 
     # ────────────────────────── 起服務 ──────────────────────────
 
-    - name: pull nginx image
+    - name: 'pull nginx image'
       ansible.builtin.command: podman pull {{ nginx_proxy_image }}
       become: true
       become_user: "{{ nginx_proxy_user }}"
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: 建 ~nginx-proxy/.config/systemd/user/（daemon-reload 前要先有目錄）
+    - name: '建 ~nginx-proxy/.config/systemd/user/（daemon-reload 前要先有目錄）'
       ansible.builtin.file:
         path: "/home/{{ nginx_proxy_user }}/.config/systemd/user"
         state: directory
@@ -101,7 +101,7 @@
         group: "{{ nginx_proxy_user }}"
         mode: "0750"
 
-    - name: 裝 systemd **user** unit（~nginx-proxy/.config/systemd/user，靠 linger 開機自動起）
+    - name: '裝 systemd **user** unit（~nginx-proxy/.config/systemd/user，靠 linger 開機自動起）'
       ansible.builtin.copy:
         dest: "/home/{{ nginx_proxy_user }}/.config/systemd/user/nginx-proxy.service"
         owner: "{{ nginx_proxy_user }}"
@@ -127,7 +127,7 @@
           [Install]
           WantedBy=default.target
 
-    - name: systemctl --user daemon-reload + enable + start nginx-proxy.service
+    - name: 'systemctl --user daemon-reload + enable + start nginx-proxy.service'
       ansible.builtin.command: "{{ item }}"
       become: true
       become_user: "{{ nginx_proxy_user }}"
@@ -137,7 +137,7 @@
         - systemctl --user daemon-reload
         - systemctl --user enable --now nginx-proxy.service
 
-    - name: 確認 nginx-proxy 容器真的跑起來了
+    - name: '確認 nginx-proxy 容器真的跑起來了'
       ansible.builtin.command: podman ps --filter name=nginx-proxy --filter status=running --format {% raw %}'{{.Names}}'{% endraw %} # {% raw %}...{% endraw %} 包起來，不然 Ansible 自己的 Jinja2 會把 podman 的 Go template 語法一起吃掉
       become: true
       become_user: "{{ nginx_proxy_user }}"
@@ -150,13 +150,13 @@
 
     # ────────────────────────── 收尾 ──────────────────────────
 
-    - name: 數一下目前有幾個 vhost conf（純粹給下面印結果用）
+    - name: '數一下目前有幾個 vhost conf（純粹給下面印結果用）'
       ansible.builtin.find:
         paths: "{{ nginx_proxy_conf_dir }}"
         file_type: file
       register: nginx_proxy_conf_files
 
-    - name: 印出結果（journalctl -u bootstrap-nginx-proxy 看得到這段）
+    - name: '印出結果（journalctl -u bootstrap-nginx-proxy 看得到這段）'
       ansible.builtin.debug:
         msg:
           - "nginx 反代已就緒，監聽 {{ wireguard_vm_address }}:{{ nginx_proxy_https_port }}（只能從 WireGuard 隧道連）"
