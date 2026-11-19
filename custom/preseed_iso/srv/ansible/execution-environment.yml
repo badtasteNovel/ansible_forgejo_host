@@ -8,7 +8,7 @@
 # base_image 選 quay.io/ansible/creator-ee——官方現成的 Execution Environment
 # 映像，已經包好 ansible-core（不需要額外裝 python 套件），這支專案的 VM-side
 # playbook 只用 ansible.builtin.* 模組，沒有用到任何額外 collection，所以
-# dependencies 幾乎是空的，只在 additional_build_steps 裡補 podman——
+# dependencies 整節省略不寫，只在 additional_build_steps 裡補 podman——
 # harbor-install.yml/nginx-proxy-install.yml 的 task 要在容器裡面直接呼叫
 # podman 指令。這裡裝的是 EE 自己的 podman 二進位檔（不是把 VM 主機的
 # podman 執行檔掛進容器——不同基底映像的共享函式庫版本不一定相容，直接
@@ -29,10 +29,12 @@ images:
   base_image:
     name: quay.io/ansible/creator-ee:latest
 
-dependencies:
-  galaxy: null # 不需要任何額外 collection，harbor-install.yml/nginx-proxy-install.yml 只用 ansible.builtin.*
-  python: null
-  system: null
+### dependencies 整節不寫——不是寫 null，是乾脆不要有這個 key：這三個欄位的
+### schema 是 anyOf [string, array of string]，不包含 null，null 一樣會被嚴格
+### 驗證擋下來（jsonschema.exceptions.ValidationError: None is not valid under
+### any of the given schemas，實機重現過一次）。不需要任何額外 collection，
+### harbor-install.yml/nginx-proxy-install.yml 只用 ansible.builtin.*，省略整節
+### 比塞三個 null 更乾淨。
 
 additional_build_steps:
   append_base:
