@@ -45,8 +45,16 @@ fi
 # 說明，所以能用 pkgsel 裝好的套件就不要留給執行階段再裝）。這支只檢查、
 # 缺了就直接報錯，不嘗試現場補裝——跟 config.sh 的 ensure_navigator_tools()
 # 同一個分工方式。
+#
+# pkgsel 裝的是 squid-openssl，不是 squid 本身——Debian/Ubuntu 官方預設的
+# squid 套件編譯成連 GnuTLS（授權問題，Squid 的授權跟早期 OpenSSL 授權
+# 條款混用有爭議），下面 squid.conf 用的 ssl-bump（cert=/key=、ssl_bump
+# 那些指令）依賴 OpenSSL 專屬的 API，一般 squid 套件根本不支援，會在
+# squid -k parse 這一步直接報錯。squid-openssl 跟 squid 是互斥的替代套件
+# （provides/conflicts 同一組檔案，兩者不能同時裝），但裝出來的執行檔
+# 一樣叫 squid，所以這裡的 command -v squid 檢查不用跟著改。
 if ! command -v squid >/dev/null 2>&1; then
-  echo "錯誤：找不到 squid——應該已經在 preseed.cfg.j2 的 pkgsel/include 裝好了，golden image 建置流程有問題" >&2
+  echo "錯誤：找不到 squid——應該已經在 preseed.cfg.j2 的 pkgsel/include 裝好了（squid-openssl 套件），golden image 建置流程有問題" >&2
   exit 1
 fi
 
@@ -127,6 +135,12 @@ cat >/etc/squid/squid.conf <<'EOF'
 # CONNECT 一律解密重簽，http_access 比對到的是解密後的真正 Host，不是
 # client 宣稱的 CONNECT 目標或 TLS SNI。白名單網域清單拆到
 # /etc/squid/allowed_domains.txt，不要在這裡夾雜任何網域。
+#
+# http_port 的憑證選項用 tls-cert=/tls-key=，不是舊的 cert=/key=——Squid
+# 5 開始把 http_port 底下跟 TLS 有關的選項全部往 tls- 開頭改名，cert=/
+# key= 保留下來只是相容別名，跑 squid -k parse 會印 deprecated 警告（這份
+# 設定能不能直接動、有沒有跳出這種警告，實機跑的時候留意一下，trixie 上
+# squid-openssl 實際版本號在這個開發環境裡沒有查證的管道）。
 
 acl localnet src 10.90.0.0/24
 acl allowed_domains dstdomain "/etc/squid/allowed_domains.txt"
@@ -137,8 +151,8 @@ acl CONNECT method CONNECT
 http_port 10.90.0.1:3128 ssl-bump \
     generate-host-certificates=on \
     dynamic_cert_mem_cache_size=4MB \
-    cert=/etc/squid/ssl_cert/squidCA.pem \
-    key=/etc/squid/ssl_cert/squidCA.pem
+    tls-cert=/etc/squid/ssl_cert/squidCA.pem \
+    tls-key=/etc/squid/ssl_cert/squidCA.pem
 
 sslcrtd_program /usr/lib/squid/security_file_certgen -s /var/lib/squid/ssl_db -M 4MB
 

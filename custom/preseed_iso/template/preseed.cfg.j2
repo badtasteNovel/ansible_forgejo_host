@@ -47,23 +47,31 @@ d-i partman/confirm_nooverwrite boolean true
 d-i base-installer/kernel/image string linux-image-amd64
 
 ### Package selection
-### podman/podman-compose/buildah/ansible/yq/pipx/jq/curl/squid 全部無條件裝、
-### 每台都有——Harbor 裝不裝是開機後 bootstrap-services（見下面 services/ 那組
+### podman/podman-compose/buildah/ansible/yq/pipx/jq/curl/squid-openssl 全部
+### 無條件裝、每台都有——Harbor 裝不裝是開機後 bootstrap-services（見下面 services/ 那組
 ### shell script 的說明）才會知道的決定，build 這個當下沒有 install_harbor
 ### 這種旗標可以判斷，套件清單只能全部無條件裝好：yq 是 harbor-install.yml
 ### 要用的（改 docker-compose.yml）；pipx 是這裡的 late_command 自己用來裝
 ### ansible-builder/ansible-navigator 的（這兩個工具不在 Debian 的 apt 套件
 ### 庫裡，只能透過 pipx 裝；裝到哪裡/怎麼用見 ~/config/config.sh 跟
 ### /srv/ansible/ee.conf）；jq/curl 是 services/*.sh、/srv/harbor/rotate/*.sh
-### 自己要用的（解析表單 JSON/proxy_map.json、抓外部 Harbor 的 CA）；squid
-### 是 services/squid.sh 要用的（EE image build 專用的正向代理，full
-### bump）——套件本身在這裡用 pkgsel 裝好，squid.sh 只負責產生 CA/寫
-### squid.conf/啟用服務，不自己 apt-get install：late_command 在 d-i 自己
-### 的 chroot 裡現場操作會悄悄失效這件事，這個專案已經在 ufw 身上撞過一次
-### （見 firewall.sh.j2 的說明），能用 pkgsel 裝好的套件就不要留到執行階段
+### 自己要用的（解析表單 JSON/proxy_map.json、抓外部 Harbor 的 CA）；
+### squid-openssl 是 services/squid.sh 要用的（EE image build 專用的正向
+### 代理，full bump）——故意不是裝 squid 這個套件：Debian/Ubuntu 官方預設
+### 的 squid 套件是編譯成連 GnuTLS，不是 OpenSSL（授權問題——Squid 的授權
+### 跟 OpenSSL 早期授權條款混用有爭議，GnuTLS 沒這個問題，所以預設建成
+### GnuTLS 版本），而 ssl-bump（squid.conf 的 cert=/key=、ssl_bump 那些
+### 指令）依賴的是 OpenSSL 專屬的 API，裝一般的 squid 套件直接跑這份設定
+### 會在 squid -k parse / 啟動時直接報錯，必須裝 squid-openssl 這個另外
+### 編譯、以 OpenSSL 為後端的版本才有 ssl-bump 能力，兩者是互斥的替代
+### 套件（provides/conflicts 同一組檔案），裝了其中一個就不能同時裝另一個。
+### 套件本身在這裡用 pkgsel 裝好，squid.sh 只負責產生 CA/寫 squid.conf/
+### 啟用服務，不自己 apt-get install：late_command 在 d-i 自己的 chroot
+### 裡現場操作會悄悄失效這件事，這個專案已經在 ufw 身上撞過一次（見
+### firewall.sh.j2 的說明），能用 pkgsel 裝好的套件就不要留到執行階段
 ### 現場裝。
 tasksel tasksel/first multiselect standard
-d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible yq pipx jq curl squid
+d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible yq pipx jq curl squid-openssl
 d-i pkgsel/upgrade select none
 popularity-contest popularity-contest/participate boolean false
 
