@@ -119,7 +119,7 @@ d-i preseed/late_command string \
   echo 'makestep 1 -1' >> /target/etc/chrony/chrony.conf; \
   in-target systemctl disable systemd-timesyncd; \
   in-target systemctl enable chrony; \
-  cp -r /cdrom/srv /target/srv; \
+  cp -r /cdrom/srv/. /target/srv/; \
   chmod -R 700 /target/srv; \
   parted -s /dev/sdc mklabel gpt mkpart primary ext4 0% 100%; \
   partprobe /dev/sdc; \
