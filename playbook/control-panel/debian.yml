@@ -103,7 +103,7 @@
     generated_dir: "{{ playbook_dir }}/../../custom/generated"
     preseed_output_dir: "{{ generated_dir }}/preseed/{{ vm_name }}" # 存放要塞進 ISO 的所有檔案（preseed.cfg + host key）
     preseed_srv_output_dir: "{{ preseed_output_dir }}/srv" # preseed_output_dir 底下專門放「裝完機最終會進 VM /srv 底下」那些檔案的子目錄，目錄結構直接對齊最終的 /srv 結構（srv/ansible/、srv/harbor/、srv/nginx/...），late_command 才能用一行 cp -r 整個搬過去，不用每個檔案各寫一行 mkdir/cp/chmod
-    preseed_bootstrap_output_dir: "{{ preseed_output_dir }}/bootstrap" # 同一個道理，裝完機最終會進 VM ~{{ vm_user }}/bootstrap 底下的那些一次性檔案（bootstrap-sudo/bootstrap-firewall.sh/bootstrap-services/services/）
+    preseed_bootstrap_output_dir: "{{ preseed_output_dir }}/bootstrap" # 同一個道理，裝完機最終會進 VM ~{{ vm_user }}/bootstrap 底下的那些一次性檔案（bootstrap-sudo/bootstrap-services/services/——防火牆相關的腳本已經搬到 srv/init/，見 preseed_srv_output_dir）
     iso_output_dir: "{{ generated_dir }}/iso/{{ vm_name }}"
     preseed_output_iso: "{{ iso_output_dir }}/{{ vm_name }}-preseed.iso"
     vmx_output_path: "{{ iso_output_dir }}/{{ vm_name }}.vmx"
@@ -254,17 +254,17 @@
         GOARCH: amd64
       changed_when: true
 
-    - name: "渲染 bootstrap-firewall.sh，放進 ISO 注入資料夾（late_command 在 d-i chroot 裡套用 ufw 規則不可靠，實測會悄悄 fail-open，見 bootstrap-firewall.sh.j2 開頭說明；這支腳本讓使用者在 VM 真正開機後自己手動執行一次，才是能安全呼叫 ufw enable 的地方）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構"
-      ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../custom/preseed_iso/bootstrap/bootstrap-firewall.sh.j2"
-        dest: "{{ preseed_bootstrap_output_dir }}/bootstrap-firewall.sh"
-        mode: "0700"
-
     - name: '把 custom/preseed_iso/srv/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 /srv 的結構，一次性全部搬過去，不用每個檔案各寫一個 task（包含 rootless_podman_user_setup.yml——這是 nginx-proxy-install.yml/harbor-install.yml 在 VM 上都要 include 的共用 task fragment，原始檔跟著這整棵 srv/ 樹放在 custom/preseed_iso/srv/ansible/playbook/ 底下，不是放在 custom/scripts/ 裡：custom/scripts/ 只放工作目錄（控制節點）自己會用到的東西，任何裝機過程會被複製進 VM 的檔案都該放進 custom/preseed_iso/）。裡面幾個 .j2 樣板檔案也會原封不動一起被搬過去，之後對應的渲染 task 會在同一個目錄下產生渲染好的同名（無 .j2）檔案，渲染完會有一個專門的清理 task 把這些用不到的 .j2 原始樣板刪掉（見下面「清掉 srv/ 底下還留著 .j2 副檔名的原始樣板」）。srv/nginx/certs/ 底下放了一個 .gitignore（憑證是裝機前才簽出來的執行期產物，不會有真正的靜態來源檔案，這份 .gitignore 本身也特意擋掉這個資料夾被意外塞進真正的憑證/私鑰），純粹是為了讓這個遞迴複製能順便建出這一層目錄，不用再額外開一個 task 專門 mkdir'
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/"
         dest: "{{ preseed_srv_output_dir }}/"
         mode: "0600"
+
+    - name: '渲染 srv/init/firewall.sh（late_command 在 d-i chroot 裡套用 ufw 規則不可靠，實測會悄悄 fail-open，見該樣板開頭說明；這支腳本靠 preseed.cfg.j2 寫的 firewall.service 在 VM 真正開機後自動跑一次，才是能安全呼叫 ufw enable 的地方）——上面那個 copy task 已經把原始 .j2 樣板搬過去了，這裡用同一個來源樣板渲染出同名、無 .j2 的正式檔案蓋掉它；跟 podman-network.sh/finalizer.sh 不一樣，這支需要 lan_subnet/wireguard_listen_port 這些值，不是純文字，所以單獨多一個 template task，不能只靠上面的整包 copy'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/init/firewall.sh.j2"
+        dest: "{{ preseed_srv_output_dir }}/init/firewall.sh"
+        mode: "0700"
 
     - name: "nginx-proxy 是強制功能：CA 產生、設定檔渲染、安裝 playbook 複製進 ISO 注入資料夾"
       block:
@@ -383,6 +383,7 @@
         - nginx/conf.d/harbor.conf.j2
         - harbor/harbor.yml.j2
         - ansible/playbook/harbor_runtime_vars.yml.j2
+        - init/firewall.sh.j2
 
     - name: "編譯 bootstrap-services（VM 開機後使用者自己手動執行的互動表單，見 custom/scripts/bootstrap-services/main.go 開頭說明；go run 不適用，道理跟 bootstrap-sudo 一樣——這支要跑在 VM 上，VM 不會有 Go 工具鏈）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構"
       ansible.builtin.command:

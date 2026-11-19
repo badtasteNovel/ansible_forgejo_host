@@ -20,17 +20,32 @@ set -euo pipefail
 # ensure_ee_image() 本身就只會從 apply.sh 這條互動流程被呼叫到，沒有任何
 # 地方在開機當下自動建 EE image，所以 squid 沒有必要比 bootstrap-services
 # 更早就位——跟 harbor.sh/nginx.sh 同一個道理，簡單起見直接沿用一次性表單
-# 流程的既有慣例就好。這也代表 podman-network.sh 建的 ansible-builder-network network
-# 這時一定已經存在（srv/init/ 那三支開機就自動跑完了，遠早於使用者真的
-# SSH 進來填表單的時間點），下面綁死在那個 network 的 gateway 位址不會撞
-# 到「network 還沒建好」的狀況。
+# 流程的既有慣例就好。這也代表 podman-network.sh（srv/init/，開機就自動
+# 跑）這時早就跑完了，ansible-builder-network 這個 network 的*設定*
+# 已經存在——但這支腳本不需要在乎這個 network 的 gateway IP
+# （10.90.0.1）這時有沒有真的掛在某個介面上：下面 http_port 刻意不指定
+# 位址（監聽所有介面），不去綁那個位址。
 #
-# 跟 podman-network.sh 綁在一起看：squid 監聽在 10.90.0.1（ansible-builder-network 這個
-# network 的 gateway，podman-network.sh 用 --gateway 固定寫死，不是讓
-# podman 自己選第一個可用位址）。build container 只需要連到自己這個
-# network 的 gateway——這是 bridge 內部的事，不需要 FORWARD chain 開洞，
-# firewall.sh.j2 因此只需要一條單純的 ufw allow（INPUT chain），詳見那支
-# 腳本自己的說明。
+# 曾經讓 http_port 綁死在 10.90.0.1，想法是當 ufw/acl localnet 來源限制
+# 之外「多一層防護」，結果撞上真正的麻煩：podman（netavark 後端）只在
+# 「第一個掛在這個 network 上的 container 真正啟動」才會建出實際的
+# bridge/gateway IP（`podman network create` 當下只寫設定檔），而這台
+# VM 第一個這麼做的是 ensure_ee_image() 的 ansible-builder build——比
+# squid.sh 執行的時間點晚，所以綁定那個位址會在它還不存在時 bind 失敗
+# （實機撞過）。想解決這個時間差，試過 warmup pod、靜態 bridge、全域
+# net.ipv4.ip_nonlocal_bind sysctl 三個方向，都有各自的代價，最後發現
+# 問題根本不需要解決：10.90.0.1 是 podman 內部用來讓 container 連回
+# host 的位址，是 podman 自己的路由機制，不是這支腳本或 OS 本身需要去
+# 特別認的東西——squid 完全不需要知道、也不需要綁定這個位址，只要監聽
+# 所有介面，讓 build container 的封包（目的地自然就是它自己的 gateway
+# 10.90.0.1）送達就好。真正的存取控制已經有兩層獨立機制在做，跟 squid
+# 綁在哪個位址完全無關：
+# - ufw 的 INPUT 規則（見 firewall.sh.j2）比對封包的目的地位址/port，
+#   跟 squid 自己綁在哪個介面上無關；
+# - 下面 squid.conf 自己的 `acl localnet src 10.90.0.0/24` +
+#   `http_access deny !localnet`，直接比對封包的來源位址。
+# 綁定特定位址這件事，從頭到尾都沒有對這兩層多加任何實質防護，純粹是
+# 讓 squid 的啟動多了一個跟 podman 內部生命週期耦合的脆弱依賴，拿掉。
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "錯誤：請用 root 執行這支程式" >&2
@@ -96,8 +111,14 @@ chmod 644 "$SSL_CERT_DIR/squidCA.crt"
 # 動態簽發憑證用的資料庫——squid 第一次啟動前沒初始化過的話，ssl-bump 會
 # 直接失敗。這個目錄本身不是設定檔，是 security_file_certgen 自己管理的
 # 資料庫檔案，初始化過一次之後就一直沿用，不需要每次重跑這支腳本都重建。
+#
+# security_file_certgen -c 只會建 ssl_db 這一層（leaf 目錄），不會連父目錄
+# /var/lib/squid 一起建——squid-openssl 套件本身不保證裝完就有這個父目錄
+# （實機撞過 "Cannot create /var/lib/squid/ssl_db"，父目錄不存在，mkdir
+# 單層目錄當然失敗），所以這裡先手動確保父目錄存在。
 if [ ! -d "$SSL_DB_DIR" ]; then
   echo "==> 初始化 squid 的動態憑證資料庫..."
+  mkdir -p "$(dirname "$SSL_DB_DIR")"
   /usr/lib/squid/security_file_certgen -c -s "$SSL_DB_DIR" -M 4MB
   chown -R proxy:proxy "$SSL_DB_DIR"
 fi
@@ -141,6 +162,16 @@ cat >/etc/squid/squid.conf <<'EOF'
 # key= 保留下來只是相容別名，跑 squid -k parse 會印 deprecated 警告（這份
 # 設定能不能直接動、有沒有跳出這種警告，實機跑的時候留意一下，trixie 上
 # squid-openssl 實際版本號在這個開發環境裡沒有查證的管道）。
+#
+# http_port 刻意不指定位址（監聽所有介面）——不綁 10.90.0.1
+# （ansible-builder-network 這個 podman network 的 gateway）：那個位址
+# 是 podman 內部拿來讓 container 連回 host 用的路由機制，不是 squid 或
+# OS 本身需要特別去認的東西，綁了它只是讓 squid 的啟動多了一個跟 podman
+# 內部生命週期（netavark 延遲建立 bridge/gateway IP，要等第一個 container
+# 真正掛上這個 network 才會出現）耦合的脆弱依賴，卻沒有多換到任何實質
+# 防護（詳見這支腳本開頭的說明）。真正的存取控制在下面的 `acl localnet`/
+# `http_access deny !localnet`（來源位址限制）跟 firewall.sh.j2 的 ufw
+# 規則（目的地位址/port 限制）兩層，跟 squid 自己綁在哪個介面上無關。
 
 acl localnet src 10.90.0.0/24
 acl allowed_domains dstdomain "/etc/squid/allowed_domains.txt"
@@ -148,7 +179,7 @@ acl SSL_ports port 443
 acl Safe_ports port 80 443
 acl CONNECT method CONNECT
 
-http_port 10.90.0.1:3128 ssl-bump \
+http_port 3128 ssl-bump \
     generate-host-certificates=on \
     dynamic_cert_mem_cache_size=4MB \
     tls-cert=/etc/squid/ssl_cert/squidCA.pem \
@@ -175,4 +206,4 @@ echo "==> 啟用 squid..."
 systemctl enable squid
 systemctl restart squid
 
-echo "squid 已就緒，監聽 10.90.0.1:3128（full bump，白名單見 /etc/squid/allowed_domains.txt）"
+echo "squid 已就緒，監聽 3128（full bump，只服務 10.90.0.0/24，白名單見 /etc/squid/allowed_domains.txt）"

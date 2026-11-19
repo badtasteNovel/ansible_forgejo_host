@@ -10,7 +10,7 @@
 # 這個 nginx 是整台 VM 對外的唯一入口，TLS 在這裡集中終止，以後每多一個用
 # podman 跑的服務（不只 Harbor），都是在這個 nginx 後面加一個 server block，
 # 不需要各自另外開防火牆洞（ufw 只開這支服務自己的對外埠一次，見
-# bootstrap-firewall.sh.j2）。
+# srv/init/firewall.sh.j2）。
 #
 # 每個服務要給這個 nginx 代理的東西（憑證、vhost conf），都是控制節點裝機前
 # 就已經簽好/渲染好、隨 ISO 一起直接注入到 {{ nginx_proxy_home }}/{certs,conf.d}/
