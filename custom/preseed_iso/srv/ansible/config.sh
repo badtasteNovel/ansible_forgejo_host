@@ -35,7 +35,35 @@ ensure_ee_image() {
     return 0
   fi
   echo "==> 建立 Execution Environment image（ansible-builder build，第一次會花比較久）..." >&2
-  ansible-builder build -f "$EE_DIR/execution-environment.yml" -c "$EE_DIR/build-context" -t "$EE_IMAGE"
+  # --container-runtime podman：明確指定，不吃 ansible-builder 自己的預設值
+  # （目前預設恰好也是 podman，但這是它的事，不是這個專案自己宣告的值，不
+  # 明確寫出來的話，往後 ansible-builder 哪個版本換了預設、或這台機器哪天
+  # 也裝了 docker，實際用哪個引擎會悄悄變掉）。
+  # --extra-build-cli-args 傳給實際執行的 podman build：--network 指到
+  # /srv/init/podman-network.sh 建好的那個專用 network；--volume 把
+  # bootstrap/services/squid.sh 產生的 CA 憑證（只有憑證，不含私鑰）
+  # bind-mount 進 build container 固定路徑 /tmp/squidCA.crt——Containerfile
+  # 的 COPY 只能從 build context 讀，CA 憑證放在宿主機
+  # /etc/squid/ssl_cert/，不在 context 裡，所以用這個 podman/buildah build
+  # 特有的擴充語法（不是 Docker BuildKit 的 RUN --mount），execution-
+  # environment.yml 裡對應的 RUN 步驟會把它放進信任鏈。不再需要 --dns：
+  # build container 不直接解析任何外部網域，只需要連到 10.90.0.1 這個
+  # 固定 IP（squid 自己監聽的 gateway 位址），不涉及 DNS。
+  #
+  # http_proxy/https_proxy 故意只用行內賦值（command-scoped），不是
+  # export——squid 的白名單只開給這個 build 用到的那幾個網域，export 出去
+  # 的話會污染 apply.sh 呼叫這支函式之後的其他步驟（harbor.sh 的
+  # podman login、curl getcert 之類），讓那些完全不相關的連線也被迫走這個
+  # proxy、被白名單擋掉。這兩個變數是給 podman build 自己的 --http-proxy
+  # （預設 true）機制用的：podman build 看到呼叫它的行程環境裡有這兩個
+  # 變數，會自動原封不動帶進每一個 RUN 步驟的環境，不需要另外用
+  # --build-arg 傳。
+  http_proxy="http://10.90.0.1:3128" \
+  https_proxy="http://10.90.0.1:3128" \
+  no_proxy="" \
+    ansible-builder build --container-runtime podman \
+    --extra-build-cli-args '--network ansible-builder-network --volume /etc/squid/ssl_cert/squidCA.crt:/tmp/squidCA.crt:ro' \
+    -f "$EE_DIR/execution-environment.yml" -c "$EE_DIR/build-context" -t "$EE_IMAGE"
 }
 
 # 用環境變數指定設定檔位置（ANSIBLE_NAVIGATOR_CONFIG），不是靠 ansible-navigator

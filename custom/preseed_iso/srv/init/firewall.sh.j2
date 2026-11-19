@@ -1,0 +1,77 @@
+#!/bin/bash
+set -euo pipefail
+
+# late_command（見 preseed.cfg.j2）本來也會在裝機階段嘗試套用這份 ufw 規則，
+# 但實測發現 in-target ufw ... 在 d-i 安裝環境自己的 chroot 裡執行會悄悄
+# 失效——ufw 開機後顯示 active，但規則數是 0，等於完全沒有防火牆在擋
+# （fail-open），late_command 又是用 ; 串接、任何一步失敗都不會中止，所以
+# 裝機過程完全看不出這個問題。這支腳本把同一份規則搬到這裡——late_command
+# 寫了 podman-network.service/firewall.service/finalizer.service 三個 systemd
+# unit，ConditionPathExists 各自指著 /srv/init/ 底下自己的檔案路徑（不是
+# ConditionFirstBoot，單純檔案還在不在），彼此用 After=/Requires= 串成固定
+# 順序：podman-network → firewall → finalizer（見 finalizer.sh 自己的說明）。
+# VM 第一次真開機時依序自動跑完，裝機完就是完整防護狀態，不需要使用者手動
+# 介入；這裡才是能安全直接呼叫 `ufw enable` 的地方（不是 d-i chroot，是真正
+# 跑起來的系統，套用規則不會有風險）。
+#
+# 這支只負責套用 ufw 規則，不負責清理——清掉 /srv/init 的動作獨立成
+# finalizer.sh，只有在這支真的成功（systemd 看到 exit code 0、
+# firewall.service 變成 active）之後才會被排進去跑，失敗的話 finalizer
+# 不會被觸發，/srv/init 原樣留著讓人修完再重跑。把「套用防火牆規則」跟
+# 「事後清理」拆成兩支獨立的腳本，而不是像原來單支腳本那樣自己成功後自己
+# 刪自己：這樣這支腳本的成功/失敗語意只跟 ufw 規則本身有沒有套用成功有關，
+# 不會被一個跟防火牆邏輯無關的 rm 操作混在一起判斷。
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "錯誤：請用 sudo 執行這支程式（例如：sudo /srv/init/firewall.sh）" >&2
+  exit 1
+fi
+
+# 跟 preseed.cfg.j2 原本 late_command 裡要套用的規則完全一樣：
+# (1) WireGuard 自己的 UDP 監聽埠——只准實體 LAN 網段連進來（WireGuard 的
+#     handshake 封包是從 peer 還沒加入隧道前的真實來源位址打過來的，不能
+#     用 WireGuard 子網本身去限制，否則自己把隧道堵死）；
+# (2) SSH port——只准 WireGuard peer 子網，跟 sshd 自己的 ListenAddress
+#     鎖定是同一個不變量，ufw 只是再加一層；
+# (3) chrony 的 123/udp——同樣只准 WireGuard peer 子網；
+# (4) nginx-proxy 的對外埠——整台 VM 唯一的 HTTP(S) 入口，不管後面實際代理
+#     了哪些服務（Harbor 或以後加的任何東西），只需要開這一個洞，新增服務
+#     不用回來改這支腳本。來源刻意放行兩個網段，不是只有 WireGuard 子網：
+#     - {{ wireguard_peer_subnet }}：已經加入 WireGuard 的 peer（目前只有
+#       「agent」角色能加入 control-panel，見專案說明）。
+#     - {{ lan_subnet }}：這台 VM 以後要當 k3s host 用時，其他 server 通常
+#       會跟它在同一個實體 LAN 網段，不一定會透過 WireGuard 連——目前還沒有
+#       設計 agent-to-agent 或 server mesh 的連線方式，直接放行同網段是現階段
+#       最簡單可行的做法。
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow from {{ lan_subnet }} to any port {{ wireguard_listen_port }} proto udp
+ufw allow from {{ wireguard_peer_subnet }} to any port {{ vm_ssh_port }} proto tcp
+ufw allow from {{ wireguard_peer_subnet }} to any port 123 proto udp
+ufw allow from {{ wireguard_peer_subnet }} to any port {{ nginx_proxy_https_port }} proto tcp
+ufw allow from {{ lan_subnet }} to any port {{ nginx_proxy_https_port }} proto tcp
+
+# EE image build（ansible-builder build，見 config.sh 的 ensure_ee_image）
+# 用的 podman network（podman-network.sh 建好的那個，固定子網
+# 10.90.0.0/24、固定 gateway 10.90.0.1——這兩個值改了要連 podman-network.sh/
+# squid.sh 一起改）不再直接連外網：build container 只透過 squid（bootstrap/
+# services/squid.sh 裝的正向代理，full bump，監聽在這個 network 自己的
+# gateway 10.90.0.1:3128）出去，squid 自己依照 /etc/squid/allowed_domains.txt
+# 的白名單決定放不放行哪個網域。
+#
+# 這代表 build container 要通過的只是「連到宿主機自己」這件事（目的地就是
+# 10.90.0.1 這個本機位址），不是「轉送到外部網路」——走的是 ufw 一般的
+# INPUT chain，不是 FORWARD chain，所以不需要像第一版那樣用 `ufw route
+# allow` 開 DNS/443 的轉送例外，連帶的 DEFAULT_FORWARD_POLICY=DROP 問題
+# （最早撞到的那個問題，當時討論過不能整條 FORWARD chain 開 ACCEPT，範圍
+# 太大）也因此不再相關——host 自己收下這個封包就結束了，不會把它轉送到
+# 任何地方。squid.sh 執行的時間點晚於這三個 systemd unit（squid 跟著
+# 互動式的 bootstrap-services 表單跑，三個 unit 開機就自動跑完了），所以
+# 這條規則套用的當下，squid 還沒啟動也沒關係——ufw 規則本身跟 squid 服務
+# 有沒有在監聽是兩件獨立的事，規則先放著不影響。
+ufw allow from 10.90.0.0/24 to 10.90.0.1 port 3128 proto tcp
+
+ufw --force enable
+
+echo "ufw 規則已套用："
+ufw status verbose

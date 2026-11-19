@@ -47,17 +47,23 @@ d-i partman/confirm_nooverwrite boolean true
 d-i base-installer/kernel/image string linux-image-amd64
 
 ### Package selection
-### podman/podman-compose/buildah/ansible/yq/pipx/jq/curl 全部無條件裝、每台
-### 都有——Harbor 裝不裝是開機後 bootstrap-services（見下面 services/ 那組
+### podman/podman-compose/buildah/ansible/yq/pipx/jq/curl/squid 全部無條件裝、
+### 每台都有——Harbor 裝不裝是開機後 bootstrap-services（見下面 services/ 那組
 ### shell script 的說明）才會知道的決定，build 這個當下沒有 install_harbor
 ### 這種旗標可以判斷，套件清單只能全部無條件裝好：yq 是 harbor-install.yml
 ### 要用的（改 docker-compose.yml）；pipx 是這裡的 late_command 自己用來裝
 ### ansible-builder/ansible-navigator 的（這兩個工具不在 Debian 的 apt 套件
 ### 庫裡，只能透過 pipx 裝；裝到哪裡/怎麼用見 ~/config/config.sh 跟
 ### /srv/ansible/ee.conf）；jq/curl 是 services/*.sh、/srv/harbor/rotate/*.sh
-### 自己要用的（解析表單 JSON/proxy_map.json、抓外部 Harbor 的 CA）。
+### 自己要用的（解析表單 JSON/proxy_map.json、抓外部 Harbor 的 CA）；squid
+### 是 services/squid.sh 要用的（EE image build 專用的正向代理，full
+### bump）——套件本身在這裡用 pkgsel 裝好，squid.sh 只負責產生 CA/寫
+### squid.conf/啟用服務，不自己 apt-get install：late_command 在 d-i 自己
+### 的 chroot 裡現場操作會悄悄失效這件事，這個專案已經在 ufw 身上撞過一次
+### （見 firewall.sh.j2 的說明），能用 pkgsel 裝好的套件就不要留到執行階段
+### 現場裝。
 tasksel tasksel/first multiselect standard
-d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible yq pipx jq curl
+d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible yq pipx jq curl squid
 d-i pkgsel/upgrade select none
 popularity-contest popularity-contest/participate boolean false
 
@@ -79,16 +85,6 @@ d-i preseed/late_command string \
   chmod 600 /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/.ssh; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/bootstrap; \
-  echo '[Unit]' > /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo 'ConditionPathExists=/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh' >> /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo 'After=network.target' >> /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo '[Service]' >> /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo 'Type=oneshot' >> /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo 'ExecStart=/home/{{ vm_user }}/bootstrap/bootstrap-firewall.sh' >> /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo '[Install]' >> /target/etc/systemd/system/bootstrap-firewall.service; \
-  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/bootstrap-firewall.service; \
-  in-target systemctl enable bootstrap-firewall.service; \
   sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config; \
   sed -i '/^Port /d' /target/etc/ssh/sshd_config; \
   echo 'Port {{ ssh_port }}' >> /target/etc/ssh/sshd_config; \
@@ -121,6 +117,38 @@ d-i preseed/late_command string \
   in-target systemctl enable chrony; \
   cp -r /cdrom/srv/. /target/srv/; \
   chmod -R 700 /target/srv; \
+  echo '[Unit]' > /target/etc/systemd/system/podman-network.service; \
+  echo 'ConditionPathExists=/srv/init/podman-network.sh' >> /target/etc/systemd/system/podman-network.service; \
+  echo 'After=network.target' >> /target/etc/systemd/system/podman-network.service; \
+  echo '[Service]' >> /target/etc/systemd/system/podman-network.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/podman-network.service; \
+  echo 'ExecStart=/srv/init/podman-network.sh' >> /target/etc/systemd/system/podman-network.service; \
+  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/podman-network.service; \
+  echo '[Install]' >> /target/etc/systemd/system/podman-network.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/podman-network.service; \
+  in-target systemctl enable podman-network.service; \
+  echo '[Unit]' > /target/etc/systemd/system/firewall.service; \
+  echo 'ConditionPathExists=/srv/init/firewall.sh' >> /target/etc/systemd/system/firewall.service; \
+  echo 'After=network.target podman-network.service' >> /target/etc/systemd/system/firewall.service; \
+  echo 'Requires=podman-network.service' >> /target/etc/systemd/system/firewall.service; \
+  echo '[Service]' >> /target/etc/systemd/system/firewall.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/firewall.service; \
+  echo 'ExecStart=/srv/init/firewall.sh' >> /target/etc/systemd/system/firewall.service; \
+  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/firewall.service; \
+  echo '[Install]' >> /target/etc/systemd/system/firewall.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/firewall.service; \
+  in-target systemctl enable firewall.service; \
+  echo '[Unit]' > /target/etc/systemd/system/finalizer.service; \
+  echo 'ConditionPathExists=/srv/init/finalizer.sh' >> /target/etc/systemd/system/finalizer.service; \
+  echo 'After=network.target firewall.service' >> /target/etc/systemd/system/finalizer.service; \
+  echo 'Requires=firewall.service' >> /target/etc/systemd/system/finalizer.service; \
+  echo '[Service]' >> /target/etc/systemd/system/finalizer.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/finalizer.service; \
+  echo 'ExecStart=/srv/init/finalizer.sh' >> /target/etc/systemd/system/finalizer.service; \
+  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/finalizer.service; \
+  echo '[Install]' >> /target/etc/systemd/system/finalizer.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/finalizer.service; \
+  in-target systemctl enable finalizer.service; \
   parted -s /dev/sdc mklabel gpt mkpart primary ext4 0% 100%; \
   partprobe /dev/sdc; \
   udevadm settle; \
