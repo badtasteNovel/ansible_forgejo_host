@@ -12,58 +12,93 @@
 source /srv/ansible/ee.conf
 
 # PATH 加上 pipx 安裝位置（/root/.local/bin），這樣下面可以直接寫
-# ansible-navigator/ansible-builder（裸指令名稱）——這些工具全程以 root
-# 身份跑，pipx 裝的東西固定在 /root/.local/bin。
+# ansible-navigator（裸指令名稱）——這個工具全程以 root 身份跑，pipx 裝
+# 的東西固定在 /root/.local/bin。ansible-builder 已經不是這個專案的
+# 依賴了（見 ensure_ee_image() 的說明），不用再管它的 PATH。
 export PATH="/root/.local/bin:$PATH"
 
-# 確認 ansible-builder/ansible-navigator 可用——不負責安裝。這兩個工具理論上
-# late_command 裝機當下就該用 pipx 裝好了（見 preseed.cfg.j2），實際裝不裝
-# 得成功則是由 bootstrap_services/software-install.sh 在開機後第一次執行時
-# 補一層保證；這支只檢查，缺了就直接報錯、不嘗試現場補裝。
+# 確認 ansible-navigator 可用——不負責安裝。這個工具理論上 late_command
+# 裝機當下就該用 pipx 裝好了（見 preseed.cfg.j2），實際裝不裝得成功則是
+# 由 bootstrap_services/software-install.sh 在開機後第一次執行時補一層
+# 保證；這支只檢查，缺了就直接報錯、不嘗試現場補裝。
 ensure_navigator_tools() {
-  if command -v ansible-navigator >/dev/null 2>&1 && command -v ansible-builder >/dev/null 2>&1; then
+  if command -v ansible-navigator >/dev/null 2>&1; then
     return 0
   fi
-  echo "錯誤：找不到 ansible-builder/ansible-navigator" >&2
+  echo "錯誤：找不到 ansible-navigator" >&2
   exit 1
 }
 
 # 建 Execution Environment image——這次的 image pull 不透過 Harbor 快取
 # （Harbor 這時可能還沒裝、或根本不存在，先有雞才有蛋的必要例外）。
+#
+# 不透過 ansible-builder 產生 Containerfile，是直接用 Containerfile（跟
+# 這支同目錄）自己手寫、自己 podman build——ansible-builder 官方明確只
+# 支援 RPM 系 base image（dnf/microdnf），Debian/Ubuntu 的 apt-get 不
+# 支援、會直接 build 失敗（查過官方文件跟 GitHub issue #636，maintainer
+# 原話："intentionally designed to work only with RHEL'ish images"，不是
+# 設定錯誤，是這個工具本身的硬性限制）。舊版用 quay.io/ansible/creator-ee
+# （Fedora 系）當 base image，撞到過一個實質的相容性問題：
+# ansible-navigator.yml 把宿主機（Debian）整個 /etc 掛進容器，Debian
+# 風格的 /etc/pam.d 蓋掉了容器自己原生的 Fedora PAM 設定，兩者不相容，
+# 導致 sudo 的 PAM account 階段永遠拒絕（跟哪個帳號完全無關，連
+# `sudo -n -u root id` 切給自己都失敗；拿掉整個 /etc 掛載、只用容器原生
+# 環境測同一行指令，PAM 直接成功，兩邊對照確定是設定檔格式不相容，不是
+# 帳號/密碼設定的問題）。改成手寫 Containerfile、base image 直接用
+# debian:13-slim 之後，宿主機跟容器是同一個發行版，/etc 整個掛進去不會
+# 再有這類跨發行版設定檔衝突，問題在根源上消失，不需要像之前那樣另外
+# 存一份 image 原生 /etc/pam.d 蓋回去的繞路修法。quay.io/ansible/
+# creator-ee 本身也已經封存不再維護（官方建議改用
+# ghcr.io/ansible/community-ansible-dev-tools，但那個一樣是 Fedora 系，
+# 換了也解決不了相容性問題，所以沒有採用），這個改動同時解決了「依賴一個
+# 死專案」的問題。
 ensure_ee_image() {
   if podman image exists "$EE_IMAGE"; then
     return 0
   fi
-  echo "==> 建立 Execution Environment image（ansible-builder build，第一次會花比較久）..." >&2
-  # --container-runtime podman：明確指定，不吃 ansible-builder 自己的預設值
-  # （目前預設恰好也是 podman，但這是它的事，不是這個專案自己宣告的值，不
-  # 明確寫出來的話，往後 ansible-builder 哪個版本換了預設、或這台機器哪天
-  # 也裝了 docker，實際用哪個引擎會悄悄變掉）。
-  # --extra-build-cli-args 傳給實際執行的 podman build：--network 指到
-  # /srv/init/podman-network.sh 建好的那個專用 network；--volume 把
-  # bootstrap/services/squid.sh 產生的 CA 憑證（只有憑證，不含私鑰）
-  # bind-mount 進 build container 固定路徑 /tmp/squidCA.crt——Containerfile
-  # 的 COPY 只能從 build context 讀，CA 憑證放在宿主機
-  # /etc/squid/ssl_cert/，不在 context 裡，所以用這個 podman/buildah build
-  # 特有的擴充語法（不是 Docker BuildKit 的 RUN --mount），execution-
-  # environment.yml 裡對應的 RUN 步驟會把它放進信任鏈。不再需要 --dns：
-  # build container 不直接解析任何外部網域，只需要連到 10.90.0.1 這個
-  # 固定 IP（squid 自己監聽的 gateway 位址），不涉及 DNS。
+  echo "==> 建立 Execution Environment image（手寫 Containerfile，第一次會花比較久）..." >&2
+
+  # base image（debian:13-slim）先在這裡拉好，不交給下面 podman build
+  # 自己的 FROM 那一步去拉：這個專案的目標是「所有對外連線都要經過 squid
+  # 稽核」，宿主機自己的 podman pull 不應該例外直接打外網。這裡用
+  # https_proxy=http://127.0.0.1:3128 經過 squid.sh 裝好、也讓宿主機信任
+  # 其 CA 的那個 squid（squid 監聽所有介面，天生就包含 127.0.0.1，不需要
+  # 額外設定；squid.conf 的 acl localnet 已經多認了這個來源）。用
+  # 127.0.0.1，不是 10.90.0.1：這裡是宿主機自己發起的連線，直接走
+  # loopback 就好，10.90.0.1 是給 build container 連回宿主機用的 bridge
+  # gateway，宿主機不需要、也不應該繞那條路連自己。docker.io 相關網域
+  # 要先在 squid.sh 的白名單裡（見該腳本的說明）否則這裡會被 squid 自己
+  # 的白名單擋下來。拉好之後，下面 podman build 的 FROM 那一步看到本機
+  # 已經有這個 image，就不會再發起任何網路存取。
+  if ! podman image exists debian:13-slim; then
+    https_proxy="http://127.0.0.1:3128" podman pull debian:13-slim
+  fi
+
+  # --network 指到 /srv/init/podman-network.sh 建好的那個專用 network；
+  # --build-arg 把 proxy 位址傳給 RUN 步驟（Containerfile 裡的 apt-get/
+  # pip 都要經過 squid）。http_proxy/https_proxy 故意用 --build-arg 傳，
+  # 不是 export 成這支函式呼叫 podman build 的外層環境變數——外層環境
+  # 變數會被 podman/skopeo 自己（不只是 RUN 步驟，連 FROM 的 registry
+  # 存取都會讀到，Go 的 net/http 標準行為，不是 podman build 的
+  # --http-proxy 選項控制的範圍）直接讀到；base image 已經在上面拉好、
+  # FROM 這一步不會再碰網路，理論上用哪種傳法對 FROM 都沒差，但維持跟
+  # 「外層行程的環境變數會被非預期的地方讀到」這個已經撞過一次的坑保持
+  # 距離，不要在這裡重新引入同一種風險。--build-arg 傳的值只會透過
+  # Containerfile 內部的 ARG/ENV 機制給 RUN 步驟（http_proxy/https_proxy
+  # 屬於 Docker/buildah 內建的「predefined build args」清單，RUN 步驟
+  # 不用在 Containerfile 裡額外寫 ARG 宣告就會自動拿到）。
   #
-  # http_proxy/https_proxy 故意只用行內賦值（command-scoped），不是
-  # export——squid 的白名單只開給這個 build 用到的那幾個網域，export 出去
-  # 的話會污染 apply.sh 呼叫這支函式之後的其他步驟（harbor.sh 的
-  # podman login、curl getcert 之類），讓那些完全不相關的連線也被迫走這個
-  # proxy、被白名單擋掉。這兩個變數是給 podman build 自己的 --http-proxy
-  # （預設 true）機制用的：podman build 看到呼叫它的行程環境裡有這兩個
-  # 變數，會自動原封不動帶進每一個 RUN 步驟的環境，不需要另外用
-  # --build-arg 傳。
-  http_proxy="http://10.90.0.1:3128" \
-  https_proxy="http://10.90.0.1:3128" \
-  no_proxy="" \
-    ansible-builder build --container-runtime podman \
-    --extra-build-cli-args '--network ansible-builder-network --volume /etc/squid/ssl_cert/squidCA.crt:/tmp/squidCA.crt:ro' \
-    -f "$EE_DIR/execution-environment.yml" -c "$EE_DIR/build-context" -t "$EE_IMAGE"
+  # build context 給 /etc/squid/ssl_cert/（squid.sh 產生 CA 的那個目錄）
+  # ，不是 $EE_DIR——Containerfile 裡的 COPY squidCA.crt 只能從 context
+  # 讀，CA 憑證放在宿主機這個路徑，不在 $EE_DIR 底下。這個目錄裡還有
+  # squidCA.key/squidCA.pem，COPY 只取 squidCA.crt 這一個檔案，其餘的
+  # 檔案只是也一起被當成 context 送進 podman build（純本機操作，沒有
+  # 遠端 daemon，不會被送到任何地方），不是風險。
+  podman build \
+    --network ansible-builder-network \
+    --build-arg http_proxy=http://10.90.0.1:3128 \
+    --build-arg https_proxy=http://10.90.0.1:3128 \
+    -f "$EE_DIR/Containerfile" -t "$EE_IMAGE" /etc/squid/ssl_cert
 }
 
 # 用環境變數指定設定檔位置（ANSIBLE_NAVIGATOR_CONFIG），不是靠 ansible-navigator

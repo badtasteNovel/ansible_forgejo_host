@@ -1,13 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-# 補裝 ansible-builder/ansible-navigator——理論上 late_command 裝機當下
-# 就該用 pipx 裝好了（見 preseed.cfg.j2 開頭那兩行 in-target pipx install），
-# 但實測在真實硬體上這一步沒有穩定裝好（golden image 建置當下的某個環境
-# 因素，例如 late_command 執行當下的網路狀況，原因還沒查清楚），開機後
+# 補裝 ansible-navigator——理論上 late_command 裝機當下就該用 pipx 裝好了
+# （見 preseed.cfg.j2 那行 in-target pipx install），但實測在真實硬體上
+# 這一步沒有穩定裝好（golden image 建置當下的某個環境因素，例如
+# late_command 執行當下的網路狀況，原因還沒查清楚），開機後
 # ensure_navigator_tools() 的檢查就直接失敗。這支在這裡補一層：一次性
 # 開機流程裡，缺了才現場補裝，裝完後面的 ensure_navigator_tools() 檢查
-# 才會穩定過。
+# 才會穩定過。ansible-builder 已經不是這個專案的依賴了（EE image 改成
+# 手寫 Containerfile 直接 podman build，見 config.sh 的 ensure_ee_image()
+# 說明），不用再管它。
 #
 # 跟 config.sh 裡 ensure_navigator_tools()「只檢查、不裝」刻意分工：那支是
 # 給所有之後要跑 playbook 的地方共用的輕量檢查（包括 /srv/harbor/rotate/update.sh
@@ -22,11 +24,10 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-if command -v ansible-navigator >/dev/null 2>&1 && command -v ansible-builder >/dev/null 2>&1; then
-  echo "==> ansible-builder/ansible-navigator 已經存在，不重裝"
+if command -v ansible-navigator >/dev/null 2>&1; then
+  echo "==> ansible-navigator 已經存在，不重裝"
   exit 0
 fi
 
-echo "==> golden image 沒帶到 ansible-builder/ansible-navigator，現場用 pipx 補裝..."
-pipx install ansible-builder
+echo "==> golden image 沒帶到 ansible-navigator，現場用 pipx 補裝..."
 pipx install ansible-navigator

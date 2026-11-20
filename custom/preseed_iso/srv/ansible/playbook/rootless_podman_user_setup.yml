@@ -19,6 +19,30 @@
     system: true
     shell: /usr/sbin/nologin
     create_home: true
+    # 沒指定密碼的話，useradd 預設會把 /etc/shadow 的密碼欄位設成管理員
+    # 鎖定狀態（! 開頭）——這個狀態不只擋密碼登入，連後面 become_user
+    # 切換身份時 sudo 的 PAM account 階段也會因此直接拒絕（不是密碼驗證
+    # 失敗，是帳號本身被判定成「鎖定、不可用」，就算是 root 在 sudo、
+    # 不需要輸入任何密碼也一樣會被擋，實機撞過：
+    # "sudo: PAM account management error: Permission denied"）。
+    # password_lock: false 確保這個帳號不會被標記成管理員鎖定——這個
+    # 使用者本來就是 shell: /usr/sbin/nologin + 沒有密碼雜湊，本來就無法
+    # 用密碼登入，不需要再額外鎖一層。password: '*' 多一道保險：這個
+    # 帳號從建立起就不曾有任何密碼欄位，單靠 password_lock: false
+    # （usermod -U）在某些系統上可能對一個完全沒有密碼欄位的帳號不會
+    # 產生預期效果——'*' 是「沒有合法密碼、但不是管理員鎖定」的慣例寫法，
+    # 跟 password_lock: false 兩個一起下，不管底層 PAM 設定具體檢查的是
+    # 哪一個欄位狀態都能覆蓋到。
+    password: '*'
+    password_lock: false
+
+- name: "確保 {{ rootless_user_name }} 的 home 目錄擁有者正確（useradd -m 只有在這個路徑原本不存在時才會自動 chown 給新使用者；如果這個路徑之前就已經存在過——帳號被刪掉重建、或裝機前曾經手動碰過——擁有者會維持原樣，不會自動糾正。實機撞過：/home/harbor 停留在 root:root，導致 harbor 連自己 home 目錄下面都寫不進去，podman/ansible 自己要用的暫存檔、.local/.config 這些全部建不起來，報 permission denied）"
+  ansible.builtin.file:
+    path: "/home/{{ rootless_user_name }}"
+    state: directory
+    owner: "{{ rootless_user_name }}"
+    group: "{{ rootless_user_name }}"
+    mode: "0750"
 
 - name: "檢查 {{ rootless_user_name }} 使用者有沒有 subuid 條目"
   ansible.builtin.command: grep -q "^{{ rootless_user_name }}:" /etc/subuid
@@ -57,12 +81,50 @@
       XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[rootless_user_name][1] }}"
       DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ansible_facts.getent_passwd[rootless_user_name][1] }}/bus"
       HOME: "/home/{{ rootless_user_name }}"
+      # podman pull/run 內部處理多 UID layer 時會在 TMPDIR（沒設的話預設
+      # /var/tmp）底下建暫存目錄；這裡所有 become_user 的 task 都是透過
+      # ansible-navigator 的 EE 容器跑（見 ansible-navigator.yml），容器裡的
+      # /var/tmp 只是 image 自己本地的 overlay 檔案系統（不是 volume-mounts
+      # 掛進來的任何東西），不是真正落在主機磁碟上的路徑——實機撞過
+      # podman pull 直接噴 "creating a temporary directory: mkdir
+      # /var/tmp/container_images_storage...: no such file or directory"，
+      # 即便直接用 mkdir 手動測試同一個路徑完全沒問題，podman 自己內部的
+      # 多 UID 重新執行機制在這種 overlay-on-overlay 的巢狀結構下就是不行。
+      # 改指到 {{ rootless_user_name }} 自己的家目錄（volume-mounts 有明確
+      # 掛進來、是貨真價實落在主機磁碟上的路徑）就能繞開這個問題。
+      TMPDIR: "/home/{{ rootless_user_name }}/tmp"
       # 所有 rootless 使用者共用同一份 registry 登入憑證檔——bootstrap-services
       # 選好要用哪個 Harbor（本機裝的或外部指定的）之後，登入動作只做一次、寫
       # 進這個共用檔案，不需要每個 rootless 使用者各自登入一次。這個檔案由
       # bootstrap-services 用 root 身份寫，故意設成所有人都讀得到（見該程式
       # 自己的說明），不是每個使用者自己的 ~/.config/containers/auth.json。
       REGISTRY_AUTH_FILE: /etc/containers/mirror-auth.json
+
+- name: "建 {{ rootless_user_name }} 自己的 tmp 目錄（給上面的 TMPDIR 用，繞開容器內 /var/tmp 的問題）"
+  ansible.builtin.file:
+    path: "/home/{{ rootless_user_name }}/tmp"
+    state: directory
+    owner: "{{ rootless_user_name }}"
+    group: "{{ rootless_user_name }}"
+    mode: "0750"
+
+- name: "建 {{ rootless_user_name }} 的 ~/.config/containers/（cgroup_manager 設定檔要放的目錄）"
+  ansible.builtin.file:
+    path: "/home/{{ rootless_user_name }}/.config/containers"
+    state: directory
+    owner: "{{ rootless_user_name }}"
+    group: "{{ rootless_user_name }}"
+    mode: "0750"
+
+- name: "cgroup_manager 改用 cgroupfs（harbor/nginx-proxy 各自用自己的 rootless podman 再啟動巢狀容器——harbor 是 goharbor/prepare，nginx-proxy 未來任何用 podman run 跑子容器的流程都一樣——預設的 systemd cgroup manager 會假設自己能直接摸到 /sys/fs/cgroup/user.slice 這種路徑，但這兩個都只是沒有真正主機級權限的 rootless 使用者，--privileged 在這裡只在它自己的 user namespace 內有效，沒辦法真的加入主機的 cgroup namespace——實機撞過 crun 直接噴 'create directory `/sys/fs/cgroup/.../user.slice`: No such file or directory: OCI runtime attempted to invoke a command that was not found'。改成 cgroupfs 之後 crun 直接操作它實際摸得到的 cgroup 檔案系統，不再假設一套它沒有權限建立的 systemd 式路徑——這個設定寫在 containers.conf，對這個使用者之後所有 podman 呼叫都生效，不用每個指令各自加 --cgroup-manager=cgroupfs，podman-compose 內部呼叫的每一個 podman run 也會一併吃到這個設定）"
+  ansible.builtin.copy:
+    dest: "/home/{{ rootless_user_name }}/.config/containers/containers.conf"
+    owner: "{{ rootless_user_name }}"
+    group: "{{ rootless_user_name }}"
+    mode: "0640"
+    content: |
+      [engine]
+      cgroup_manager = "cgroupfs"
 
 - name: "服務目錄（chown 給 {{ rootless_user_name }}，遞迴——late_command 裝機當下已經把設定檔/憑證這些東西直接放進最終位置了（不是先放暫存資料夾、裝好再搬），這些目錄第一次被這個 task 碰到的時候裡面可能已經有 root 擁有的檔案，recurse: true 才能把裡面現有的東西一起改成這個使用者）"
   ansible.builtin.file:
@@ -74,8 +136,16 @@
     recurse: true
   loop: "{{ rootless_service_dirs }}"
 
-- name: '驗證 rootless podman 能動（確保後面的步驟不會卡在 linger/subuid 沒生效）'
-  ansible.builtin.command: podman info
+- name: "確保 {{ rootless_user_name }} 的 ~/.config 存在（podman 的 rootless 設定/儲存層設定檔都靠 XDG_CONFIG_HOME 預設值找這個目錄，實機撞過 podman info 直接噴 'stat /home/.../.config: no such file or directory'——create_home: true 只會從 /etc/skel 複製標準骨架檔案，.config 不是標準骨架的一部分，不會自動生出來）"
+  ansible.builtin.file:
+    path: "/home/{{ rootless_user_name }}/.config"
+    state: directory
+    owner: "{{ rootless_user_name }}"
+    group: "{{ rootless_user_name }}"
+    mode: "0750"
+
+- name: "驗證 rootless podman 能動（確保後面的步驟不會卡在 linger/subuid 沒生效；故意不用 podman info——這支指令內部會另外去查詢 cgroup controller/libpod 設定目錄這類只有在真正走過 PAM session 註冊的行程下才會穩定成功的診斷資訊，用 become_user 這種單純切身份的呼叫方式跑，實機交叉驗證過多次：有時噴 'getting available cgroup controllers: ... no such file or directory'，有時噴 'mkdir /run/user/<uid>/libpod: permission denied'，兩種訊息在同一套環境下都出現過，顯然是 podman info 這個子指令自己對執行環境的假設跟這裡的呼叫方式不匹配，不是設定錯誤。podman ps 走的是完全不同的程式碼路徑，不會碰這些診斷查詢，而且是這份 playbook 後面幾個 task、以及 harbor-install.yml/nginx-proxy-install.yml 真正會用到的操作本身，用 podman pull/podman run 分別交叉測試過，在同樣的 become_user 呼叫方式、同樣的 ansible-navigator EE 容器環境下都穩定成功——podman ps 才是真正代表『rootless podman 能不能用』的查驗，不是 podman info 的診斷輸出）"
+  ansible.builtin.command: podman ps
   become: true
   become_user: "{{ rootless_user_name }}"
   environment: "{{ rootless_podman_env }}"

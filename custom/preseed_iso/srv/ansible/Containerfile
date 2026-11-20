@@ -1,0 +1,125 @@
+# 手寫、單一 stage 的 Containerfile，取代原本透過 ansible-builder 產生的
+# 多 stage 版本——ansible-builder 官方明確只支援 RPM 系 base image
+# （dnf/microdnf），Debian/Ubuntu 的 apt-get 不支援、會直接 build 失敗
+# （查證過官方文件跟 GitHub issue #636，maintainer 原話："intentionally
+# designed to work only with RHEL'ish images"，不是設定錯誤，是這個工具
+# 本身的硬性限制）。這台 VM 本身是 Debian，用一個 RPM 系的 EE image
+# （舊版用 quay.io/ansible/creator-ee，Fedora 系）造成過實質的相容性
+# 問題：ansible-navigator.yml 把宿主機整個 /etc 掛進容器，Debian 風格的
+# /etc/pam.d 蓋掉了容器自己原生的 Fedora PAM 設定，兩者不相容，導致
+# sudo 的 PAM account 階段永遠拒絕（跟哪個帳號完全無關，連
+# sudo -n -u root id 切給自己都失敗，實機撞過、也用對照實驗確認過兩種
+# 環境各自單獨運作都正常，問題只出在混用的那一刻）。改成 Debian base
+# 之後，宿主機跟容器是同一個發行版，/etc 整個掛進去不會再有這類跨發行版
+# 設定檔衝突（CA 憑證路徑、nsswitch.conf、os-release 這些細節本來就是
+# Debian 對 Debian）。quay.io/ansible/creator-ee 本身也已經封存不再維護
+# （官方建議改用 ghcr.io/ansible/community-ansible-dev-tools，但那個一樣
+# 是 Fedora 系，換了也解決不了相容性問題，所以沒有採用），這個改動同時
+# 解決了「依賴一個死專案」的問題。
+#
+# 也因為是單一 stage、自己手寫，不需要再處理 ansible-builder 產生的多
+# stage 版本那個「CA 信任鏈不會跨 stage 帶過去」的坑（之前要另外建一個
+# localhost/creator-ee-squid-trusted:latest 衍生 image 來解決，見
+# config.sh 舊版 ensure_ee_image() 的說明）——這裡只有一個 stage，信任一
+# 次就夠，整段邏輯都可以拿掉。
+FROM debian:13-slim
+
+# ca-certificates 要先裝——debian:13-slim 本身沒有內建（實機撞過
+# "update-ca-certificates: not found"，上一版把 COPY+update-ca-certificates
+# 放在這裡之前，是錯的假設）。這一步理論上不需要先信任 squid 的 CA 才能
+# 動：Debian 官方 image 預設的 apt 來源（deb.debian.org）走純 HTTP，不是
+# HTTPS——套件完整性是靠 Release 檔案的 GPG 簽章保護，不是靠 TLS，這也是
+# 為什麼 Debian 的 docker image 可以用 HTTP 來源卻還算安全的常見做法。
+# podman：harbor-install.yml/nginx-proxy-install.yml 的 task 要在容器裡
+# 直接呼叫 podman 指令操作 VM 主機的真實狀態（見 ansible-navigator.yml
+# 的 volume-mounts/--privileged --pid=host 說明）；podman-compose：
+# harbor-install.yml 最後一步 `podman-compose up -d` 要用，Debian 的
+# podman-compose 套件跟 podman 是分開兩個套件，不會因為裝了 podman 就
+# 自動帶進來（實機撞過 "env: 'podman-compose': No such file or
+# directory"）；passwd/sudo：
+# rootless_podman_user_setup.yml 要用 useradd（passwd 套件提供）跟
+# become/become_user（需要 sudo 指令存在，容器裡沒裝一樣會噴
+# "sudo: command not found"）；systemd：rootless_podman_user_setup.yml
+# 的 `loginctl enable-linger`、harbor-install.yml/nginx-proxy-install.yml
+# 的 `systemctl --user ...` 都要用到這兩個指令（實機撞過
+# "[Errno 2] No such file or directory: b'loginctl'"，手寫套件清單漏掉
+# 這個——這個套件只提供 CLI 工具本身，容器裡不會真的跑一個獨立的
+# systemd 當 PID 1，`loginctl`/`systemctl` 實際講話的對象是透過
+# --pid=host + /run 掛進來的宿主機那個真正在跑的 systemd）；
+# openssh-client：這幾支 playbook 不需要但保留一個最小的網路工具集，
+# 之後要加東西比較方便。uidmap：rootless podman 要用 /etc/subuid、
+# /etc/subgid 裡配到的多個 UID/GID 區段做 user namespace 映射，實際執行
+# 這個映射動作要靠 newuidmap/newgidmap 這兩個 setuid-root 的 helper 執行檔，
+# 這兩個不是 podman 套件本身附帶的，是獨立的 uidmap 套件才有——實機撞過
+# "command required for rootless mode with multiple IDs: exec: \"newuidmap\":
+# executable file not found in $PATH"，rootless_podman_user_setup.yml 的
+# become_user: harbor 驗證 task 會直接卡死在這裡。passt（提供 pasta）、
+# slirp4netns：rootless podman 的容器網路要靠這兩個其中一個才能動
+# （podman 預設用 pasta），這兩個套件在 Debian 的 podman 套件裡只是
+# Recommends，不是 Depends——主機本身（preseed.cfg.j2 的 pkgsel/include）
+# 會自動帶進 Recommends，所以主機裝 podman 時這兩個順便就裝好了，但這裡
+# 用 --no-install-recommends（下面每個套件都是明確列出來的，不想讓這份
+# 清單悄悄被上游套件的 Recommends 關係牽著變動），兩個套件必須自己明確
+# 列出來，不能依賴 podman 間接帶進來——實機撞過 podman run 直接噴
+# "could not find pasta ... executable file not found in $PATH"（這個
+# $PATH 字樣只是 Go 錯誤訊息的泛用措辭，實際上 pasta 這個執行檔在容器裡
+# 根本不存在，不是找不到路徑）。nftables（提供 nft 指令）：netavark（podman
+# 用來管理「同一個 podman network 內的容器彼此連線」這類網路的後端，是
+# podman 套件的直接依賴，會自動裝進來，但它本身需要 nft 去寫 NAT/轉送
+# 規則，nftables 這個套件不是 netavark 的依賴，要自己明確列——實機撞過
+# harbor-install.yml 最後 podman-compose up -d 時，redis 容器卡在
+# Created 狀態永遠起不來，錯誤是 "netavark: nftables error: unable to
+# execute nft: No such file or directory"，Harbor 的 docker-compose.yml
+# 幫好幾個服務建了一個共用的 podman network 讓它們互相連線，就是靠
+# netavark+nft 這條路）；aardvark-dns：同一個 podman network 裡用容器名稱
+# （不是 IP）互相找到彼此要用的 DNS，也是 Recommends 不是 Depends，一樣
+# 要自己明確列。curl 是下面下載 yq 二進位檔要用的。這個「預設 HTTP 來源」
+# 一樣是沒有實機驗證過的假設，如果錯了，這一步會直接卡住，錯誤訊息會很
+# 清楚，不是靜默問題。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+      python3 \
+      python3-venv \
+      openssh-client \
+      podman \
+      podman-compose \
+      passwd \
+      sudo \
+      systemd \
+      uidmap \
+      passt \
+      slirp4netns \
+      nftables \
+      aardvark-dns \
+      curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# 信任 squid full-bump 重簽過的憑證——上面裝好 ca-certificates 之後才有
+# update-ca-certificates 這個指令可以用。squidCA.crt 是 config.sh 的
+# ensure_ee_image() 呼叫 podman build 時，把 /etc/squid/ssl_cert/ 整個
+# 目錄當作 build context 傳進來的（COPY 只能從 context 讀，只取這一個
+# 檔案，不含私鑰）。下面的 pip install（走 HTTPS 連 pypi.org）需要這張
+# CA 才能通過驗證；上面這一步 apt-get 如果真的是走 HTTP，本來就不需要
+# 它，所以排在這之後不影響。
+COPY squidCA.crt /usr/local/share/ca-certificates/squidCA.crt
+RUN update-ca-certificates
+
+# yq 直接下載 Mike Farah 寫的 Go 版二進位檔，不透過 apt——Debian 套件庫裡
+# 的 yq 套件是 kislyuk 寫的 Python 版（本質是包著 jq 的 wrapper），指令
+# 語法跟這個完全不相容：harbor-install.yml 用的
+# `del(.services.log)`/`.services[].logging = {...}` 這種直接操作 YAML
+# 路徑的語法只有 Go 版支援，Python 版的 `-i` 參數意義也不一樣（實機撞過
+# "yq: -i/--in-place can only be used with -y/-Y/-t/-x"，裝的是對的套件名
+# 卻是錯的工具）。版本號（v4.54.3）寫死、不是「拉 latest」，理由跟專案
+# 其他地方明確釘版本一樣：要能重現、不要被上游悄悄換掉的行為影響。
+RUN curl -fsSL -o /usr/local/bin/yq \
+      https://github.com/mikefarah/yq/releases/download/v4.54.3/yq_linux_amd64 \
+    && chmod +x /usr/local/bin/yq
+
+# ansible-core 用 pip 裝進獨立 venv，不吃 Debian 套件庫裡可能存在的版本
+# ——跟這個專案在宿主機上用 pipx 裝 ansible-navigator 同一個理由：版本要
+# 能明確控制，不要被系統套件庫版本悄悄牽著走，也不用等 Debian 套件庫
+# 什麼時候才跟上游同步。
+RUN python3 -m venv /opt/ansible-venv \
+    && /opt/ansible-venv/bin/pip install --no-cache-dir ansible-core
+ENV PATH="/opt/ansible-venv/bin:${PATH}"

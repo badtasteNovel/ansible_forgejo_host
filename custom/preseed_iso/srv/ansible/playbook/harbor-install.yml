@@ -2,7 +2,7 @@
 # Harbor 安裝 playbook——是不是要裝、什麼時候裝，現在是 VM 開機後使用者自己
 # 手動跑 bootstrap-services（見 custom/scripts/bootstrap-services/）互動問出來
 # 的決定，不是裝機當下自動的。bootstrap-services 選了「要在本機裝 Harbor」
-# 之後，用 ansible-navigator（不是裸的 ansible-playbook，見 execution-environment.yml）
+# 之後，用 ansible-navigator（不是裸的 ansible-playbook，見 ansible-navigator.yml/Containerfile）
 # 執行這支檔案，跑在 VM 自己身上（hosts: localhost, connection: local）。
 #
 # 邏輯對照 lg-laravel 專案 scripts/tasks/podman-deploy/harbor.yaml 的
@@ -179,10 +179,8 @@
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: '查 podman-compose 的絕對路徑（systemd unit 的 ExecStart 要用絕對路徑，不能依賴 PATH）'
-      ansible.builtin.command: command -v podman-compose
-      args:
-        executable: /bin/bash
+    - name: '查 podman-compose 的絕對路徑（systemd unit 的 ExecStart 要用絕對路徑，不能依賴 PATH；故意用 which 不用 command -v——ansible.builtin.command 不會透過 shell 執行，直接 execve() 呼叫參數指定的執行檔，command -v 是 shell 自己的 builtin，不是磁碟上真正存在的獨立執行檔，實機撞過 "Error executing command."、rc 2、沒有任何 stderr 內容——which 才是磁碟上真正存在的執行檔，command 模組可以直接呼叫）'
+      ansible.builtin.command: which podman-compose
       changed_when: false
       register: harbor_podman_compose_path
 
@@ -425,6 +423,13 @@
 
     # ────────────────────────── 收尾 ──────────────────────────
 
+    - name: '印出結果（journalctl -u bootstrap-harbor 看得到這段；故意排在清掉一次性檔案之前——下面那個 task 會刪掉 harbor_runtime_vars.yml，這裡的 msg 用到的 harbor_hostname 就是從那個檔案的 vars_files 讀進來的，順序顛倒會直接噴 "harbor_hostname is undefined"，實機撞過）'
+      ansible.builtin.debug:
+        msg:
+          - "Harbor 已就緒：https://{{ harbor_hostname }}:{{ nginx_proxy_https_port }}（透過 nginx-proxy 連，不是 harbor_internal_http_port）"
+          - "admin 密碼就是 custom/.env 的 HARBOR_ADMIN_PASSWORD"
+          - "robot 拉取帳號存在 {{ harbor_secrets_dir }}/robot-name、{{ harbor_secrets_dir }}/robot-secret（root-only 可讀）"
+
     - name: '清掉這支 playbook 自己用過的一次性檔案（harbor_runtime_vars.yml 裡有明文密碼，用完就刪；harbor-install.yml 自己也是一次性的，裝完就沒用了）'
       ansible.builtin.file:
         path: "/srv/ansible/playbook/{{ item }}"
@@ -432,10 +437,3 @@
       loop:
         - harbor_runtime_vars.yml
         - harbor-install.yml
-
-    - name: '印出結果（journalctl -u bootstrap-harbor 看得到這段）'
-      ansible.builtin.debug:
-        msg:
-          - "Harbor 已就緒：https://{{ harbor_hostname }}:{{ nginx_proxy_https_port }}（透過 nginx-proxy 連，不是 harbor_internal_http_port）"
-          - "admin 密碼就是 custom/.env 的 HARBOR_ADMIN_PASSWORD"
-          - "robot 拉取帳號存在 {{ harbor_secrets_dir }}/robot-name、{{ harbor_secrets_dir }}/robot-secret（root-only 可讀）"

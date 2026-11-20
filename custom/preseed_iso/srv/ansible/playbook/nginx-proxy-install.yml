@@ -3,7 +3,7 @@
 # bootstrap-services 表單裡自己選的；但「什麼時候裝」現在也統一由
 # bootstrap-services 決定時機（先處理完 Harbor 那塊、registries.conf.d mirror
 # 設好之後才觸發這支，這樣這支自己要 pull 的 nginx image 才吃得到 Harbor 的
-# pull-through cache），用 ansible-navigator 執行（見 execution-environment.yml），
+# pull-through cache），用 ansible-navigator 執行（見 ansible-navigator.yml/Containerfile），
 # 不是 systemd 在開機時自動觸發，跑在 VM 自己身上（hosts: localhost,
 # connection: local）。
 #

@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # 設定 squid（套件安裝見 preseed.cfg.j2 的 pkgsel/include，這支只負責產生
-# CA、寫設定、啟用服務），當 EE image 建置（ansible-builder build →
-# podman build，見 config.sh 的 ensure_ee_image()）專用的正向代理——full bump 模式：對每個
-# CONNECT 一律解密、用自己的 CA 重簽，http_access 比對到的是解密後真正的
-# Host，不是 client 自稱的 CONNECT 目標或 TLS SNI（這兩者都可能跟封包裡
-# 實際的 Host 不一致，是只做 peek+splice 會留下的洞，討論過後決定接受
-# full bump 多出來的成本——多一張 CA 要塞進 build container 的信任鏈，見
-# execution-environment.yml 跟 config.sh）。
+# CA、寫設定、啟用服務），當 EE image 建置（手寫 Containerfile → podman
+# build，見 config.sh 的 ensure_ee_image()）專用的正向代理——full bump
+# 模式：對每個 CONNECT 一律解密、用自己的 CA 重簽，http_access 比對到的
+# 是解密後真正的 Host，不是 client 自稱的 CONNECT 目標或 TLS SNI（這兩者
+# 都可能跟封包裡實際的 Host 不一致，是只做 peek+splice 會留下的洞，討論
+# 過後決定接受 full bump 多出來的成本——多一張 CA 要塞進 build container
+# 的信任鏈，見 Containerfile 跟 config.sh）。
 #
 # apply.sh 呼叫這支的時機要排在 ensure_ee_image 之前（squid 沒先跑起來，
 # EE build 連不出去）；跟 harbor.sh/nginx.sh 不一樣，這支不需要表單填的
@@ -30,7 +30,7 @@ set -euo pipefail
 # 之外「多一層防護」，結果撞上真正的麻煩：podman（netavark 後端）只在
 # 「第一個掛在這個 network 上的 container 真正啟動」才會建出實際的
 # bridge/gateway IP（`podman network create` 當下只寫設定檔），而這台
-# VM 第一個這麼做的是 ensure_ee_image() 的 ansible-builder build——比
+# VM 第一個這麼做的是 ensure_ee_image() 的 podman build——比
 # squid.sh 執行的時間點晚，所以綁定那個位址會在它還不存在時 bind 失敗
 # （實機撞過）。想解決這個時間差，試過 warmup pod、靜態 bridge、全域
 # net.ipv4.ip_nonlocal_bind sysctl 三個方向，都有各自的代價，最後發現
@@ -108,6 +108,19 @@ chmod 640 "$SSL_CERT_DIR/squidCA.key" "$SSL_CERT_DIR/squidCA.pem"
 # 不想因為擁有者是 proxy 而讀不到。
 chmod 644 "$SSL_CERT_DIR/squidCA.crt"
 
+# 讓宿主機自己也信任這張 CA——config.sh 的 ensure_ee_image() 現在會先在
+# 宿主機上用 https_proxy=http://127.0.0.1:3128 經過這個 squid 把 EE
+# image 的 base image（debian:13-slim）拉下來，不讓宿主機自己的
+# podman pull 繞過 squid 直接打外網（跟 build container 裡 RUN 步驟的
+# 套件安裝一樣，全部對外連線都要經過這裡稽核/比對白名單）。
+# full bump 會用這張 CA 重簽宿主機看到的憑證，宿主機自己的 TLS client
+# （podman/skopeo，底層是 Go 的 crypto/x509，在 Debian 上吃的是
+# update-ca-certificates 維護的那份系統信任鏈）不信任的話，pull 會直接
+# 卡在憑證驗證失敗——跟 harbor.sh 信任 Harbor CA 是同一個道理
+# （LOCAL_CA_TRUST_PATH），只是這次信任的是這支腳本自己剛生出來的 CA。
+cp "$SSL_CERT_DIR/squidCA.crt" /usr/local/share/ca-certificates/ansible-builder-network-squid-ca.crt
+update-ca-certificates
+
 # 動態簽發憑證用的資料庫——squid 第一次啟動前沒初始化過的話，ssl-bump 會
 # 直接失敗。這個目錄本身不是設定檔，是 security_file_certgen 自己管理的
 # 資料庫檔案，初始化過一次之後就一直沿用，不需要每次重跑這支腳本都重建。
@@ -128,13 +141,23 @@ fi
 # 網域）就好，不用碰 squid.conf、也不用重新理解整份設定。只在第一次建立
 # 時寫入 seed 內容，重跑這支腳本不會蓋掉之後手動加上去的網域。
 #
-# 目前的 seed 內容是依據 execution-environment.yml 的 base_image
-# （quay.io/ansible/creator-ee）跟它 additional_build_steps 那一行
-# `microdnf install ... || (apt-get update && apt-get install ...)` 猜出來的
-# 常見套件鏡像站網域，沒有實機跑過完整 build 驗證過——這個 base image
-# 實際繼承自哪個發行版、預設用哪個鏡像站，在這個開發環境裡沒有查證的
-# 管道，跟專案其他「依通用知識寫成、沒有實機驗證」的部分（.vmx guestOS
-# 字串、virtualHW.version）同一個性質。真的跑 build 時如果某個網域被擋，
+# 目前的 seed 內容對應 Containerfile 跟 ensure_ee_image() 實際會連到的
+# 網域：.docker.io/.docker.com 是拉 base image（debian:13-slim，Docker
+# Hub）要用的——registry-1.docker.io/auth.docker.io 這些 API 本身是
+# docker.io 底下的子網域，實際的 image layer 內容多半是從 Cloudflare 的
+# CDN（production.cloudflare.docker.com，docker.com 底下）送出來的，兩個
+# 頂層網域一起開才夠；.debian.org 是 Containerfile 裡 apt-get 要用的；
+# .pypi.org/.files.pythonhosted.org 是 pip install ansible-core 要用的；
+# .github.com/.githubusercontent.com 是 Containerfile 下載 yq（Mike Farah
+# 寫的 Go 版，不是 Debian 套件庫裡那個 Python 包 jq 的舊版 yq，兩者指令語法
+# 完全不相容，harbor-install.yml 用的 `del(...)`/`.services[].x = {...}`
+# 這種語法只有 Go 版才支援）二進位檔要用的——GitHub release 的實際檔案是從
+# objects.githubusercontent.com 這個 CDN 網域送出來的，跟 release 頁面本身
+# 的 github.com 是兩個不同網域，要一起開。
+# 這幾個都不是猜的，是對著 Containerfile 實際的 FROM/RUN 內容推出來的，
+# 但沒有實機跑過完整 build 驗證過（Docker Hub 的 CDN 網域名稱尤其
+# 可能隨時間/地區改變，跟專案其他「依通用知識寫成、沒有實機驗證」的
+# 部分同一個性質）。真的跑 build 時如果某個網域被擋，
 # /var/log/squid/access.log 會看到 TCP_DENIED，把那個網域加進這個檔案、
 # systemctl reload squid 之後重跑 build 就好，不需要再跑這支腳本。
 if [ ! -f /etc/squid/allowed_domains.txt ]; then
@@ -142,20 +165,22 @@ if [ ! -f /etc/squid/allowed_domains.txt ]; then
 # EE image build 白名單網域——一行一個，開頭加 . 代表含子網域。
 # 任何網域都可以加進這裡，squid.conf 的 allowed_domains acl 直接讀這個檔案，
 # 加完存檔後 systemctl reload squid 就會生效，不需要重跑 squid.sh。
-.fedoraproject.org
-.centos.org
-.redhat.com
+.docker.io
+.docker.com
 .debian.org
-.ubuntu.com
+.pypi.org
+.files.pythonhosted.org
+.github.com
+.githubusercontent.com
 EOF
 fi
 
 cat >/etc/squid/squid.conf <<'EOF'
 # 由 squid.sh 自動產生——只服務 podman-network.sh 建的 ansible-builder-network 這個
-# podman network（10.90.0.0/24），其他來源一律拒絕。full bump：所有
-# CONNECT 一律解密重簽，http_access 比對到的是解密後的真正 Host，不是
-# client 宣稱的 CONNECT 目標或 TLS SNI。白名單網域清單拆到
-# /etc/squid/allowed_domains.txt，不要在這裡夾雜任何網域。
+# podman network（10.90.0.0/24）跟宿主機自己（127.0.0.1），其他來源一律
+# 拒絕。full bump：所有 CONNECT 一律解密重簽，http_access 比對到的是
+# 解密後的真正 Host，不是 client 宣稱的 CONNECT 目標或 TLS SNI。白名單
+# 網域清單拆到 /etc/squid/allowed_domains.txt，不要在這裡夾雜任何網域。
 #
 # http_port 的憑證選項用 tls-cert=/tls-key=，不是舊的 cert=/key=——Squid
 # 5 開始把 http_port 底下跟 TLS 有關的選項全部往 tls- 開頭改名，cert=/
@@ -172,8 +197,15 @@ cat >/etc/squid/squid.conf <<'EOF'
 # 防護（詳見這支腳本開頭的說明）。真正的存取控制在下面的 `acl localnet`/
 # `http_access deny !localnet`（來源位址限制）跟 firewall.sh.j2 的 ufw
 # 規則（目的地位址/port 限制）兩層，跟 squid 自己綁在哪個介面上無關。
+# 順便附帶一個好處：監聽所有介面本來就自動包含 127.0.0.1，不需要為了
+# 讓宿主機自己也能連進來另外加一條 http_port——config.sh 的
+# ensure_ee_image() 現在會在宿主機上用 https_proxy=http://127.0.0.1:3128
+# 經過這裡拉 base image（debian:13-slim），不讓宿主機自己的
+# podman pull 繞過 squid 直接打外網，所以下面 acl localnet 要多認
+# 127.0.0.1 這個來源，不然會被 `http_access deny !localnet` 擋掉。
 
 acl localnet src 10.90.0.0/24
+acl localnet src 127.0.0.1/32
 acl allowed_domains dstdomain "/etc/squid/allowed_domains.txt"
 acl SSL_ports port 443
 acl Safe_ports port 80 443

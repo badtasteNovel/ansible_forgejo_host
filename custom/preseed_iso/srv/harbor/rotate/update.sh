@@ -4,7 +4,7 @@ set -euo pipefail
 # 把這台 VM 上的 Harbor 升級到指定版本——跟 bootstrap-services 不一樣，
 # 這是日常維運工具，不是一次性的，跑完不會自我刪除，可以重複執行。真正
 # 做事的是 harbor-update.yml（跟這支放同一個資料夾），這支只負責：檢查
-# 參數、確保 ansible-builder/ansible-navigator/EE image 都還在，然後呼叫
+# 參數、確保 ansible-navigator/EE image 都還在，然後呼叫
 # ansible-navigator run。
 #
 # 只處理「換版本、podman-compose up -d 重建容器」這件事本身，不動 robot

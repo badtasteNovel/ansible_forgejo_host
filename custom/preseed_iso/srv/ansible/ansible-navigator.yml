@@ -13,14 +13,26 @@
 # 操作 rootless podman 的儲存層，這些都是會動到 VM 主機真實狀態的操作，
 # 不是容器自己關起門來的事。--privileged --pid=host 讓容器裡的 systemctl
 # 真的能透過掛進來的 /run/systemd socket 跟 VM 主機的 systemd 講話。
-# 這塊設定沒有實機驗證過，見 execution-environment.yml 開頭的說明。
+# 這塊設定沒有實機驗證過，見 config.sh 的 ensure_ee_image() 開頭的說明
+# （EE image 現在是手寫 Containerfile、直接用 debian:13-slim 當 base，
+# 不是透過 ansible-builder 產生）。
+#
+# 整個 /etc 掛進來這件事，之前 base image 還是 quay.io/ansible/
+# creator-ee（Fedora 系）的時候，蓋掉了容器自己原生的 /etc/pam.d，造成
+# sudo 的 PAM account 階段永遠拒絕（詳見 config.sh 的 ensure_ee_image()
+# 的說明）——改成 debian:13-slim 之後，宿主機跟容器是同一個發行版，這個
+# 問題在根源上消失，不需要額外處理。
+#
+# --user=0：明確指定這個容器用 root（UID 0）身份跑，不要讓它吃 image 自己
+# 的預設使用者（我們自己的 Containerfile 沒有寫 USER，預設就是 root，但
+# 明確寫出來比依賴這個隱性預設更保險——以後如果 Containerfile 加了 USER
+# 指令，這裡不會悄悄跟著變。--privileged 本身已經給這個容器完整的 Linux
+# capabilities，不需要真的是 UID 0 也能做 useradd 之類的操作，但
+# become/sudo 這種會查「呼叫者是誰」的場景需要名義上的 UID 真的是 0，
+# sudo 對 root 才有跳過密碼驗證的內建邏輯）。
 #
 # 故意不掛 /opt：這兩支 playbook 完全沒有任何地方碰 /opt（這個專案本來就
-# 刻意不用 /opt 放自己的東西，一律改放 /srv/<name>，見 CLAUDE.md），掛了
-# 反而會出事——ansible-builder 建出來的 EE image，自己內建的 entrypoint
-# 腳本就放在 image 裡的 /opt/builder/bin/entrypoint，掛 VM host 的 /opt
-# 進去會直接蓋掉它，容器連 entrypoint 都找不到（實機撞過 crun: executable
-# file '/opt/builder/bin/entrypoint' not found）。
+# 刻意不用 /opt 放自己的東西，一律改放 /srv/<name>，見 CLAUDE.md）。
 #
 # /home 不能整個掛：ansible-runner 自己有一道安全檢查，擋掉 "/"、"/home"、
 # "/usr" 這三個完整路徑的掛載（實機撞過
@@ -42,6 +54,31 @@ ansible-navigator:
       - "--privileged"
       - "--pid=host"
       - "--network=host"
+      - "--user=0"
+      # /run 故意不走下面 volume-mounts 那個結構化欄位，改用這裡的原生
+      # podman -v 參數直接傳 rslave propagation——ansible-navigator 自己對
+      # volume-mounts.options 的值做白名單檢查，只接受 ro/rw/Z/z/O，傳
+      # rslave 會直接被設定檔驗證擋下來（"Unrecognized option: 'rslave'"），
+      # 不會真的傳到 podman 那層，container-options 是直接原封不動轉給
+      # podman 當 CLI 參數，沒有這層額外驗證。
+      #
+      # 加 rslave 的原因：ansible-navigator 整個 playbook 執行期間只開一個
+      # 長駐的 EE 容器，容器啟動當下 harbor/nginx-proxy 的帳號可能還不存在，
+      # /run/user/<uid> 這個 tmpfs（systemd-logind 收到 loginctl
+      # enable-linger 後才會掛，見 rootless_podman_user_setup.yml）當然也
+      # 還不存在。podman 預設的 bind mount propagation 是 private，容器
+      # 啟動「之後」主機才新掛上去的子掛載點不會同步反映進這個已經在跑的
+      # 容器——實機撞過 become_user: harbor 第一次呼叫 podman（不管是
+      # podman info 還是 podman ps）固定噴 "mkdir /run/user/<uid>/libpod:
+      # permission denied"，但用一個全新的容器重試就會馬上成功（新容器啟動
+      # 時 /run/user/<uid> 已經存在，初始快照就是對的），證明問題出在
+      # propagation，不是權限本身。/run 本身在主機上已經是 shared
+      # propagation（findmnt 可以確認），rslave 讓容器端變成這個 shared
+      # peer group 的 slave，之後主機新掛的東西會自動同步進來，但容器內部
+      # 自己建立的掛載不會反向傳回主機（比完全雙向的 shared 更安全、足夠
+      # 這裡的需求）。
+      - "-v"
+      - "/run:/run:rw,rslave"
     volume-mounts:
       - src: /etc
         dest: /etc
@@ -52,8 +89,20 @@ ansible-navigator:
       - src: /home/nginx-proxy
         dest: /home/nginx-proxy
         options: rw
-      - src: /run
-        dest: /run
+      # harbor_home（/srv/harbor）、nginx_proxy_home（/srv/nginx）都在這裡
+      # 底下——late_command 裝機當下已經把 harbor.yml/憑證/vhost conf 這些
+      # 東西直接放進最終位置了（見 control-panel/debian.yml），harbor-install.yml/
+      # nginx-proxy-install.yml 要讀寫這些檔案。整個 /srv 掛進來，不是隻掛
+      # /srv/harbor、/srv/nginx 兩條——/srv/ansible（這份 playbook 自己的
+      # 位置）本來就靠 ansible-navigator 自動掛 playbook 所在目錄才摸得到，
+      # 跟這裡的 volume-mounts 設定無關，但 /srv/harbor、/srv/nginx 是跟
+      # playbook 不同層的獨立子目錄，不會被那個自動行為一起帶到，必須自己
+      # 明確掛——實機撞過 harbor-install.yml 收緊 harbor.yml 權限那個 task
+      # 直接噴 "file (/srv/harbor/harbor.yml) is absent, cannot continue"，
+      # 但同一個檔案在主機本身是存在的，純粹因為容器完全沒掛 /srv 這個
+      # 目錄，根本看不到。
+      - src: /srv
+        dest: /srv
         options: rw
       - src: /var/lib
         dest: /var/lib

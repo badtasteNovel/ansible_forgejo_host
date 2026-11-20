@@ -47,14 +47,21 @@ d-i partman/confirm_nooverwrite boolean true
 d-i base-installer/kernel/image string linux-image-amd64
 
 ### Package selection
-### podman/podman-compose/buildah/ansible/yq/pipx/jq/curl/squid-openssl 全部
+### podman/podman-compose/buildah/ansible/pipx/jq/curl/squid-openssl 全部
 ### 無條件裝、每台都有——Harbor 裝不裝是開機後 bootstrap-services（見下面 services/ 那組
 ### shell script 的說明）才會知道的決定，build 這個當下沒有 install_harbor
-### 這種旗標可以判斷，套件清單只能全部無條件裝好：yq 是 harbor-install.yml
-### 要用的（改 docker-compose.yml）；pipx 是這裡的 late_command 自己用來裝
-### ansible-builder/ansible-navigator 的（這兩個工具不在 Debian 的 apt 套件
-### 庫裡，只能透過 pipx 裝；裝到哪裡/怎麼用見 ~/config/config.sh 跟
-### /srv/ansible/ee.conf）；jq/curl 是 services/*.sh、/srv/harbor/rotate/*.sh
+### 這種旗標可以判斷，套件清單只能全部無條件裝好：yq（改 docker-compose.yml）
+### 只有 harbor-install.yml 會用到，而這支 playbook 無條件透過
+### ansible-navigator 的 EE 容器跑，host 本身從來不會直接呼叫 yq，所以這裡
+### 不裝——裝了也是錯的工具：Debian 套件庫裡的 yq 是 kislyuk 寫的 Python
+### 版（包著 jq），跟 harbor-install.yml 用的 Mike Farah Go 版語法不相容，
+### 真正要用的 yq 是直接在 Containerfile 裡下載 Go 版二進位檔裝進 EE image
+### （見 Containerfile 自己的說明）；pipx 是這裡的 late_command 自己用來裝
+### ansible-navigator 的（這個工具不在 Debian 的 apt 套件庫裡，只能透過
+### pipx 裝；裝到哪裡/怎麼用見 ~/config/config.sh 跟 /srv/ansible/ee.conf
+### ——ansible-builder 已經不是這個專案的依賴了，EE image 改成手寫
+### Containerfile 直接 podman build，見 config.sh 的 ensure_ee_image()
+### 說明）；jq/curl 是 services/*.sh、/srv/harbor/rotate/*.sh
 ### 自己要用的（解析表單 JSON/proxy_map.json、抓外部 Harbor 的 CA）；
 ### squid-openssl 是 services/squid.sh 要用的（EE image build 專用的正向
 ### 代理，full bump）——故意不是裝 squid 這個套件：Debian/Ubuntu 官方預設
@@ -69,9 +76,20 @@ d-i base-installer/kernel/image string linux-image-amd64
 ### 啟用服務，不自己 apt-get install：late_command 在 d-i 自己的 chroot
 ### 裡現場操作會悄悄失效這件事，這個專案已經在 ufw 身上撞過一次（見
 ### firewall.sh.j2 的說明），能用 pkgsel 裝好的套件就不要留到執行階段
-### 現場裝。
+### 現場裝；vim 是明確裝完整版——tasksel 的 standard task 預設只會帶
+### vim-tiny（語法高亮、較新的編輯體驗都被閹割掉），這裡額外列出 vim
+### 讓 apt 把完整版一起裝上，不用等開機後再手動裝；uidmap 提供
+### newuidmap/newgidmap 這兩個 setuid-root helper——rootless podman 要用
+### /etc/subuid、/etc/subgid 配到的多個 UID/GID 區段做 user namespace
+### 映射，這兩個執行檔是獨立套件，不是 podman 本身附帶的。harbor/
+### nginx-proxy 裝好之後是用 systemctl --user 常駐執行（見
+### rootless_podman_user_setup.yml/harbor-install.yml/
+### nginx-proxy-install.yml），這些常駐服務是直接在 VM 主機本身、不透過
+### ansible-navigator 的 EE 容器跑，所以主機這邊也要有這個套件，不能只
+### 裝在 Containerfile 裡（EE 容器只在裝機後 bootstrap-services 跑設置
+### playbook 時用得到，常駐服務的生命週期比它長得多）。
 tasksel tasksel/first multiselect standard
-d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible yq pipx jq curl squid-openssl
+d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible pipx jq curl squid-openssl vim uidmap
 d-i pkgsel/upgrade select none
 popularity-contest popularity-contest/participate boolean false
 
@@ -83,7 +101,6 @@ d-i grub-installer/bootdev string default
 d-i finish-install/reboot_in_progress note
 
 d-i preseed/late_command string \
-  in-target pipx install ansible-builder; \
   in-target pipx install ansible-navigator; \
   mkdir -p /target/home/{{ vm_user }}/.ssh; \
   echo 'from="{{ wireguard_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
@@ -98,6 +115,8 @@ d-i preseed/late_command string \
   echo 'Port {{ ssh_port }}' >> /target/etc/ssh/sshd_config; \
   echo '{{ vm_user }} ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/{{ vm_user }}; \
   chmod 440 /target/etc/sudoers.d/{{ vm_user }}; \
+  echo 'root ALL=(harbor,nginx-proxy) NOPASSWD: ALL' > /target/etc/sudoers.d/ansible-ee-rootless-become; \
+  chmod 440 /target/etc/sudoers.d/ansible-ee-rootless-become; \
   cp /cdrom/ssh_host_key /target/etc/ssh/ssh_host_ed25519_key; \
   cp /cdrom/ssh_host_key.pub /target/etc/ssh/ssh_host_ed25519_key.pub; \
   chmod 600 /target/etc/ssh/ssh_host_ed25519_key; \

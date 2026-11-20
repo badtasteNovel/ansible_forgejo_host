@@ -51,7 +51,7 @@ ufw allow from {{ wireguard_peer_subnet }} to any port 123 proto udp
 ufw allow from {{ wireguard_peer_subnet }} to any port {{ nginx_proxy_https_port }} proto tcp
 ufw allow from {{ lan_subnet }} to any port {{ nginx_proxy_https_port }} proto tcp
 
-# EE image build（ansible-builder build，見 config.sh 的 ensure_ee_image）
+# EE image build（手寫 Containerfile → podman build，見 config.sh 的 ensure_ee_image）
 # 用的 podman network（podman-network.sh 建好的那個，固定子網
 # 10.90.0.0/24、固定 gateway 10.90.0.1——這兩個值改了要連 podman-network.sh/
 # squid.sh 一起改）不再直接連外網：build container 只透過 squid（bootstrap/

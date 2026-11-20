@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# 給 EE image build（ansible-builder build → podman build）專用的一個 podman
+# 給 EE image build（手寫 Containerfile → podman build）專用的一個 podman
 # network，固定釘死一個子網——不是不寫、讓 podman 用它自己預設的那個
 # network（CNI 後端叫 cni-podman0、netavark 後端叫 podman0，兩者都是 podman
 # 網路後端自己的實作細節，哪個後端生效、子網/bridge 介面名稱叫什麼，會隨
@@ -10,7 +10,7 @@ set -euo pipefail
 # network、自己決定子網，firewall.sh 的 ufw 規則就能直接認這個我們自己定義、
 # 不會因為 podman 升級而改變的子網，不用去猜介面名稱或 podman 預設子網。
 #
-# 只有這一個用途：ansible-builder build 這一步（build EE image 期間
+# 只有這一個用途：podman build 這一步（build EE image 期間
 # microdnf/pip 要連外網裝套件）要用。其他地方都不需要靠這個：
 # - ansible-navigator 真正跑 playbook 時，EE 容器用的是 --network=host（見
 #   ansible-navigator.yml），走的是 host 自己的網路，不會經過任何 bridge；

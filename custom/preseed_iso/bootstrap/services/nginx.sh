@@ -9,11 +9,9 @@ set -euo pipefail
 # shellcheck source=/srv/ansible/config.sh
 source /srv/ansible/config.sh
 
-# 跟 harbor.sh 建 /home/harbor 同一個道理：ansible-navigator.yml 掛了
-# /home/nginx-proxy，ansible-navigator 自己在容器啟動前就檢查這個路徑存不
-# 存在，nginx-proxy 這個使用者還沒被 nginx-proxy-install.yml 的 useradd 建
-# 出來之前，host 上要先有這個目錄。nginx-proxy 是 debian.yml 寫死的常數。
-mkdir -p /home/nginx-proxy
+# /home/harbor、/home/nginx-proxy 兩個目錄已經在 apply.sh 裡集中建好了
+# （ansible-navigator.yml 的 volume-mounts 是共用設定，驗證的是清單裡
+# 全部的來源路徑，不只是這次用到的那一個），這裡不用再處理。
 
 echo "==> 開始安裝 nginx-proxy（ansible-navigator run nginx-proxy-install.yml）..." >&2
 run_navigator "$NGINX_PROXY_PLAYBOOK"
