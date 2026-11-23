@@ -1,4 +1,4 @@
-# 共用的環境設定——apply.sh/harbor.sh/nginx.sh/software-install.sh、
+# 共用的環境設定——apply.sh/harbor.sh/caddy.sh/software-install.sh、
 # /srv/harbor/rotate/update.sh 這種日常維運腳本都在自己最前面 source 這份，不要
 # 各自宣告一樣的路徑常數。這份檔案本身不是可執行腳本（沒有 shebang、沒有
 # set -e），純粹是 source 進別人 shell 的設定/函式庫，被 source 進來的腳本
@@ -114,11 +114,11 @@ PROXY_MAP_PATH=/srv/harbor/proxy_map.json
 # ——寫死常數，不是裝機前渲染進來的值：control-panel/debian.yml 自己也是
 # 寫死 443，從來不是每台 VM 不一樣的東西，跟下面這些路徑常數待遇一樣，
 # 不需要另外搞一份注入檔案來傳這一個數字。
-NGINX_PROXY_HTTPS_PORT=443
+CADDY_PROXY_HTTPS_PORT=443
 HARBOR_PLAYBOOK=/srv/ansible/playbook/harbor-install.yml
-NGINX_PROXY_PLAYBOOK=/srv/ansible/playbook/nginx-proxy-install.yml
+CADDY_PROXY_PLAYBOOK=/srv/ansible/playbook/caddy-proxy-install.yml
 HARBOR_SECRETS_DIR=/srv/harbor/secrets
-LOCAL_HARBOR_CA_PATH=/srv/nginx/certs/ca.crt # 本機裝 Harbor 時，nginx-proxy 的 CA（control-panel/debian.yml 裝機前就簽好、隨 ISO 注入）
+LOCAL_HARBOR_CA_PATH=/srv/caddy/certs/ca.crt # 本機裝 Harbor 時，caddy-proxy 的 CA（control-panel/debian.yml 裝機前就簽好、隨 ISO 注入）
 LOCAL_CA_TRUST_PATH=/usr/local/share/ca-certificates/bootstrap-services-local-harbor-ca.crt
 EXTERNAL_CA_TRUST_PATH=/usr/local/share/ca-certificates/bootstrap-services-external-harbor-ca.crt
 MIRROR_AUTH_FILE=/etc/containers/mirror-auth.json # 所有 rootless 使用者共用這一份登入憑證檔，見 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml

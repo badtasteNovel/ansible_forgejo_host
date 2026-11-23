@@ -34,7 +34,7 @@ fi
 # (2) SSH port——只准 WireGuard peer 子網，跟 sshd 自己的 ListenAddress
 #     鎖定是同一個不變量，ufw 只是再加一層；
 # (3) chrony 的 123/udp——同樣只准 WireGuard peer 子網；
-# (4) nginx-proxy 的對外埠——整台 VM 唯一的 HTTP(S) 入口，不管後面實際代理
+# (4) caddy-proxy 的對外埠——整台 VM 唯一的 HTTP(S) 入口，不管後面實際代理
 #     了哪些服務（Harbor 或以後加的任何東西），只需要開這一個洞，新增服務
 #     不用回來改這支腳本。來源刻意放行兩個網段，不是只有 WireGuard 子網：
 #     - {{ wireguard_peer_subnet }}：已經加入 WireGuard 的 peer（目前只有
@@ -48,8 +48,8 @@ ufw default allow outgoing
 ufw allow from {{ lan_subnet }} to any port {{ wireguard_listen_port }} proto udp
 ufw allow from {{ wireguard_peer_subnet }} to any port {{ vm_ssh_port }} proto tcp
 ufw allow from {{ wireguard_peer_subnet }} to any port 123 proto udp
-ufw allow from {{ wireguard_peer_subnet }} to any port {{ nginx_proxy_https_port }} proto tcp
-ufw allow from {{ lan_subnet }} to any port {{ nginx_proxy_https_port }} proto tcp
+ufw allow from {{ wireguard_peer_subnet }} to any port {{ caddy_proxy_https_port }} proto tcp
+ufw allow from {{ lan_subnet }} to any port {{ caddy_proxy_https_port }} proto tcp
 
 # EE image build（手寫 Containerfile → podman build，見 config.sh 的 ensure_ee_image）
 # 用的 podman network（podman-network.sh 建好的那個，固定子網

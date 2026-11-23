@@ -82,9 +82,9 @@ d-i base-installer/kernel/image string linux-image-amd64
 ### newuidmap/newgidmap 這兩個 setuid-root helper——rootless podman 要用
 ### /etc/subuid、/etc/subgid 配到的多個 UID/GID 區段做 user namespace
 ### 映射，這兩個執行檔是獨立套件，不是 podman 本身附帶的。harbor/
-### nginx-proxy 裝好之後是用 systemctl --user 常駐執行（見
+### caddy-proxy 裝好之後是用 systemctl --user 常駐執行（見
 ### rootless_podman_user_setup.yml/harbor-install.yml/
-### nginx-proxy-install.yml），這些常駐服務是直接在 VM 主機本身、不透過
+### caddy-proxy-install.yml），這些常駐服務是直接在 VM 主機本身、不透過
 ### ansible-navigator 的 EE 容器跑，所以主機這邊也要有這個套件，不能只
 ### 裝在 Containerfile 裡（EE 容器只在裝機後 bootstrap-services 跑設置
 ### playbook 時用得到，常駐服務的生命週期比它長得多）。
@@ -115,7 +115,7 @@ d-i preseed/late_command string \
   echo 'Port {{ ssh_port }}' >> /target/etc/ssh/sshd_config; \
   echo '{{ vm_user }} ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/{{ vm_user }}; \
   chmod 440 /target/etc/sudoers.d/{{ vm_user }}; \
-  echo 'root ALL=(harbor,nginx-proxy) NOPASSWD: ALL' > /target/etc/sudoers.d/ansible-ee-rootless-become; \
+  echo 'root ALL=(harbor,caddy-proxy) NOPASSWD: ALL' > /target/etc/sudoers.d/ansible-ee-rootless-become; \
   chmod 440 /target/etc/sudoers.d/ansible-ee-rootless-become; \
   cp /cdrom/ssh_host_key /target/etc/ssh/ssh_host_ed25519_key; \
   cp /cdrom/ssh_host_key.pub /target/etc/ssh/ssh_host_ed25519_key.pub; \

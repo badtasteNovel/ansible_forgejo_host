@@ -14,7 +14,7 @@ set -euo pipefail
 # microdnf/pip 要連外網裝套件）要用。其他地方都不需要靠這個：
 # - ansible-navigator 真正跑 playbook 時，EE 容器用的是 --network=host（見
 #   ansible-navigator.yml），走的是 host 自己的網路，不會經過任何 bridge；
-# - harbor/nginx-proxy 這兩個 rootless 使用者的 podman，預設走
+# - harbor/caddy-proxy 這兩個 rootless 使用者的 podman，預設走
 #   slirp4netns/pasta（使用者自己的 user namespace 裡用 userspace NAT），
 #   不是 bridge+veth，一樣不會受這條規則影響。
 #

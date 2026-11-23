@@ -13,7 +13,7 @@
 # srv/init/firewall.sh.j2）。
 #
 # 每個服務要給這個 nginx 代理的東西（憑證、vhost conf），都是控制節點裝機前
-# 就已經簽好/渲染好、隨 ISO 一起直接注入到 {{ nginx_proxy_home }}/{certs,conf.d}/
+# 就已經簽好/渲染好、隨 ISO 一起直接注入到 {{ caddy_proxy_home }}/{certs,conf.d}/
 # 底下（見 control-panel/debian.yml）——不是先放另一個暫存資料夾、裝好再搬，
 # late_command 就直接放進最終位置，這支只負責「把 nginx 這個容器本身架起來」，
 # 完全不需要知道後面實際代理了哪些服務、也不需要在執行期跟其他服務的安裝
@@ -22,14 +22,14 @@
 # 底下一定會有 Harbor 那份，以後新增其他服務也是一樣的模式，直接多幾個檔案，
 # 不需要這支自己處理。
 #
-# 全程以 nginx-proxy 這個 rootless 專屬系統使用者的身份跑 podman/systemctl --user
+# 全程以 caddy-proxy 這個 rootless 專屬系統使用者的身份跑 podman/systemctl --user
 # （容器逃逸拿不到主機 root，也跟 harbor 使用者彼此隔離），rootless 使用者設置
 # 那段跟 harbor-install.yml 共用同一份 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml。
 #
-# nginx-proxy 容器用 --network=host，不是 -p 單純 port mapping：它要反代的
+# caddy-proxy 容器用 --network=host，不是 -p 單純 port mapping：它要反代的
 # 後端（Harbor 之類）是「另一個 rootless 使用者」自己的 podman-compose 服務，
 # 綁在 VM 主機的 127.0.0.1 上（見 harbor-install.yml 限制 proxy service port
-# 那段）。如果 nginx-proxy 用自己獨立的 network namespace（-p 的預設行為），
+# 那段）。如果 caddy-proxy 用自己獨立的 network namespace（-p 的預設行為），
 # 它容器內的 127.0.0.1 只會指向自己，完全摸不到主機的 127.0.0.1，等於永遠連
 # 不到任何後端。--network=host 讓 nginx 直接共用 VM 主機的網路堆疊，才能用
 # 127.0.0.1 連到其他 rootless 使用者各自發布在主機 loopback 上的服務——也因為
@@ -43,38 +43,38 @@
   gather_facts: false
 
   vars_files:
-    - /srv/ansible/playbook/nginx_proxy_runtime_vars.yml
+    - /srv/ansible/playbook/caddy_proxy_runtime_vars.yml
 
   vars:
-    nginx_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh、harbor-install.yml 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 nginx_proxy_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行訊息
-    nginx_proxy_conf_dir: "{{ nginx_proxy_home }}/conf.d"
-    nginx_proxy_cert_dir: "{{ nginx_proxy_home }}/certs"
-    nginx_proxy_image: "docker.io/library/nginx:stable"
+    caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh、harbor-install.yml 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 caddy_proxy_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行訊息
+    caddy_proxy_sites_dir: "{{ caddy_proxy_home }}/conf.d"
+    caddy_proxy_cert_dir: "{{ caddy_proxy_home }}/certs"
+    caddy_proxy_image: "docker.io/library/nginx:stable"
 
   tasks:
     # ────────────────────────── rootless 使用者 ──────────────────────────
 
-    - name: '建立 nginx-proxy 這個 rootless 專屬系統使用者'
+    - name: '建立 caddy-proxy 這個 rootless 專屬系統使用者'
       ansible.builtin.include_tasks:
         file: /srv/ansible/playbook/rootless_podman_user_setup.yml # 原始檔是 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著整棵 srv/ 樹裝機前由 control-panel/debian.yml 複製進 ISO——這支 playbook 跑在 VM 上，摸不到控制節點的 repo，只能吃注入進來的這份
       vars:
-        rootless_user_name: "{{ nginx_proxy_user }}"
+        rootless_user_name: "{{ caddy_proxy_user }}"
         rootless_service_dirs:
-          - "{{ nginx_proxy_home }}"
-          - "{{ nginx_proxy_conf_dir }}"
-          - "{{ nginx_proxy_cert_dir }}"
+          - "{{ caddy_proxy_home }}"
+          - "{{ caddy_proxy_sites_dir }}"
+          - "{{ caddy_proxy_cert_dir }}"
 
     # ────────────────────────── 信任庫 ──────────────────────────
     # 每個服務的 CA/leaf 憑證、vhost conf 已經由控制節點簽好/渲染好、隨 ISO
-    # 直接注入到 {{ nginx_proxy_cert_dir }}/{{ nginx_proxy_conf_dir }}（不是先放
-    # 另一個暫存資料夾、裝好再搬），擁有者/權限也已經由上面「建立 nginx-proxy
+    # 直接注入到 {{ caddy_proxy_cert_dir }}/{{ caddy_proxy_sites_dir }}（不是先放
+    # 另一個暫存資料夾、裝好再搬），擁有者/權限也已經由上面「建立 caddy-proxy
     # 這個 rootless 專屬系統使用者」那步的 recurse: true chown 處理掉了，這裡
     # 不需要再搬一次。
 
     - name: '把 CA 灌進系統信任庫（這台機器上的 podman/buildah/curl 要信任自己這個 nginx 簽出來的憑證——以後這台 VM 當 k3s host 時，本機自己 pull 自己背後的服務也要用到）'
       ansible.builtin.copy:
-        src: "{{ nginx_proxy_cert_dir }}/ca.crt"
-        dest: /usr/local/share/ca-certificates/nginx-proxy-ca.crt
+        src: "{{ caddy_proxy_cert_dir }}/ca.crt"
+        dest: /usr/local/share/ca-certificates/caddy-proxy-ca.crt
         remote_src: true
         mode: "0644"
       register: ca_trust_copy
@@ -87,25 +87,25 @@
     # ────────────────────────── 起服務 ──────────────────────────
 
     - name: 'pull nginx image'
-      ansible.builtin.command: podman pull {{ nginx_proxy_image }}
+      ansible.builtin.command: podman pull {{ caddy_proxy_image }}
       become: true
-      become_user: "{{ nginx_proxy_user }}"
+      become_user: "{{ caddy_proxy_user }}"
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: '建 ~nginx-proxy/.config/systemd/user/（daemon-reload 前要先有目錄）'
+    - name: '建 ~caddy-proxy/.config/systemd/user/（daemon-reload 前要先有目錄）'
       ansible.builtin.file:
-        path: "/home/{{ nginx_proxy_user }}/.config/systemd/user"
+        path: "/home/{{ caddy_proxy_user }}/.config/systemd/user"
         state: directory
-        owner: "{{ nginx_proxy_user }}"
-        group: "{{ nginx_proxy_user }}"
+        owner: "{{ caddy_proxy_user }}"
+        group: "{{ caddy_proxy_user }}"
         mode: "0750"
 
-    - name: '裝 systemd **user** unit（~nginx-proxy/.config/systemd/user，靠 linger 開機自動起）'
+    - name: '裝 systemd **user** unit（~caddy-proxy/.config/systemd/user，靠 linger 開機自動起）'
       ansible.builtin.copy:
-        dest: "/home/{{ nginx_proxy_user }}/.config/systemd/user/nginx-proxy.service"
-        owner: "{{ nginx_proxy_user }}"
-        group: "{{ nginx_proxy_user }}"
+        dest: "/home/{{ caddy_proxy_user }}/.config/systemd/user/caddy-proxy.service"
+        owner: "{{ caddy_proxy_user }}"
+        group: "{{ caddy_proxy_user }}"
         mode: "0644"
         content: |
           [Unit]
@@ -115,49 +115,49 @@
           [Service]
           Type=oneshot
           RemainAfterExit=yes
-          ExecStartPre=-/usr/bin/podman rm -f nginx-proxy
-          ExecStart=/usr/bin/podman run -d --name nginx-proxy --network=host \
-            -v {{ nginx_proxy_conf_dir }}:/etc/nginx/conf.d:z,ro \
-            -v {{ nginx_proxy_cert_dir }}:/etc/nginx/certs:z,ro \
-            {{ nginx_proxy_image }}
-          ExecStop=/usr/bin/podman stop nginx-proxy
+          ExecStartPre=-/usr/bin/podman rm -f caddy-proxy
+          ExecStart=/usr/bin/podman run -d --name caddy-proxy --network=host \
+            -v {{ caddy_proxy_sites_dir }}:/etc/nginx/conf.d:z,ro \
+            -v {{ caddy_proxy_cert_dir }}:/etc/caddy/certs:z,ro \
+            {{ caddy_proxy_image }}
+          ExecStop=/usr/bin/podman stop caddy-proxy
           Restart=on-failure
           RestartSec=15
 
           [Install]
           WantedBy=default.target
 
-    - name: 'systemctl --user daemon-reload + enable + start nginx-proxy.service'
+    - name: 'systemctl --user daemon-reload + enable + start caddy-proxy.service'
       ansible.builtin.command: "{{ item }}"
       become: true
-      become_user: "{{ nginx_proxy_user }}"
+      become_user: "{{ caddy_proxy_user }}"
       environment: "{{ rootless_podman_env }}"
       changed_when: true
       loop:
         - systemctl --user daemon-reload
-        - systemctl --user enable --now nginx-proxy.service
+        - systemctl --user enable --now caddy-proxy.service
 
-    - name: '確認 nginx-proxy 容器真的跑起來了'
-      ansible.builtin.command: podman ps --filter name=nginx-proxy --filter status=running --format {% raw %}'{{.Names}}'{% endraw %} # {% raw %}...{% endraw %} 包起來，不然 Ansible 自己的 Jinja2 會把 podman 的 Go template 語法一起吃掉
+    - name: '確認 caddy-proxy 容器真的跑起來了'
+      ansible.builtin.command: podman ps --filter name=caddy-proxy --filter status=running --format {% raw %}'{{.Names}}'{% endraw %} # {% raw %}...{% endraw %} 包起來，不然 Ansible 自己的 Jinja2 會把 podman 的 Go template 語法一起吃掉
       become: true
-      become_user: "{{ nginx_proxy_user }}"
+      become_user: "{{ caddy_proxy_user }}"
       environment: "{{ rootless_podman_env }}"
       changed_when: false
-      register: nginx_proxy_running_check
+      register: caddy_proxy_running_check
       retries: 10
       delay: 3
-      until: nginx_proxy_running_check.stdout | trim == 'nginx-proxy'
+      until: caddy_proxy_running_check.stdout | trim == 'caddy-proxy'
 
     # ────────────────────────── 收尾 ──────────────────────────
 
     - name: '數一下目前有幾個 vhost conf（純粹給下面印結果用）'
       ansible.builtin.find:
-        paths: "{{ nginx_proxy_conf_dir }}"
+        paths: "{{ caddy_proxy_sites_dir }}"
         file_type: file
-      register: nginx_proxy_conf_files
+      register: caddy_proxy_site_files
 
-    - name: '印出結果（journalctl -u bootstrap-nginx-proxy 看得到這段）'
+    - name: '印出結果（journalctl -u bootstrap-caddy-proxy 看得到這段）'
       ansible.builtin.debug:
         msg:
-          - "nginx 反代已就緒，監聽 {{ wireguard_vm_address }}:{{ nginx_proxy_https_port }}（只能從 WireGuard 隧道連）"
-          - "目前代理的服務數量：{{ nginx_proxy_conf_files.files | length }}（每多裝一個服務，這裡會多一個 vhost）"
+          - "nginx 反代已就緒，監聽 {{ wireguard_vm_address }}:{{ caddy_proxy_https_port }}（只能從 WireGuard 隧道連）"
+          - "目前代理的服務數量：{{ caddy_proxy_site_files.files | length }}（每多裝一個服務，這裡會多一個 vhost）"

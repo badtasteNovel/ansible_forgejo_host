@@ -10,7 +10,7 @@
 #
 # Harbor 自己完全不碰 TLS——只在 127.0.0.1 上講明文 HTTP（見 harbor-install.yml
 # 把 docker-compose.yml 的 proxy service port 限制在 loopback 那段），TLS 統一
-# 由獨立的 nginx 反代（nginx-proxy）集中終止，Harbor 不知道、也不需要知道自己
+# 由獨立的 nginx 反代（caddy-proxy）集中終止，Harbor 不知道、也不需要知道自己
 # 被掛在哪個 hostname/對外埠後面。external_url 填的是「client 端實際連線時看到
 # 的位址」（過了 nginx 之後的那個），不是 Harbor 自己的 http.port——Harbor 用這個
 # 值組 redirect Location 之類的絕對 URL，要跟 client 端真正打的位址一致。
@@ -20,7 +20,7 @@ hostname: {{ harbor_hostname }}
 http:
   port: {{ harbor_internal_http_port }}
 
-external_url: https://{{ harbor_hostname }}:{{ nginx_proxy_https_port }}
+external_url: https://{{ harbor_hostname }}:{{ caddy_proxy_https_port }}
 
 harbor_admin_password: {{ harbor_admin_password }}
 

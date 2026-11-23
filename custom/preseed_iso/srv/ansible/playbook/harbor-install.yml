@@ -9,10 +9,10 @@
 # preflight → cert → install → configure-proxy-cache 這條流程搬過來的，主要差異：
 #   - cert 那步整個拿掉：Harbor 自己完全不碰 TLS，只在 127.0.0.1 上講明文 HTTP
 #     （見下面限制 proxy service port 那段）。TLS 統一由獨立的 nginx 反代
-#     （nginx-proxy，見 custom/preseed_iso/srv/nginx/）集中終止
+#     （caddy-proxy，見 custom/preseed_iso/srv/caddy/）集中終止
 #     ——CA/leaf 憑證是控制節點裝機前用 community.crypto 簽好、隨 ISO注入到
-#     nginx-proxy 的暫存資料夾（不是這支 playbook 的暫存資料夾），這支完全不碰
-#     憑證檔案，也不用把 CA 灌進系統信任庫（那是 nginx-proxy-install.yml 的事）。
+#     caddy-proxy 的暫存資料夾（不是這支 playbook 的暫存資料夾），這支完全不碰
+#     憑證檔案，也不用把 CA 灌進系統信任庫（那是 caddy-proxy-install.yml 的事）。
 #   - 密碼不是存 pass（GPG 密碼管理工具，這個專案沒有這套東西）：admin/db 密碼
 #     來自 custom/.env，裝機前就渲染進 harbor_runtime_vars.yml 一起注入；robot
 #     帳號的 secret 是真正的執行期產物，裝好之後存在本機檔案（見最後一個 play）。
@@ -25,7 +25,7 @@
 # 全程以 harbor 這個 rootless 專屬系統使用者的身份跑 podman / podman-compose /
 # systemctl --user（容器逃逸拿不到主機 root），對應 lg-laravel 專案
 # scripts/bin/rootless-podman.sh 的 rootless_user_run，這裡用 become_user +
-# environment 做一樣的事。rootless 使用者設置那段跟 nginx-proxy-install.yml
+# environment 做一樣的事。rootless 使用者設置那段跟 caddy-proxy-install.yml
 # 共用同一份 /srv/ansible/playbook/rootless_podman_user_setup.yml（原始檔是
 # custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著
 # 整棵 srv/ 樹一起搬過去，不用額外的複製 task）。
@@ -39,7 +39,7 @@
     - /srv/ansible/playbook/harbor_runtime_vars.yml
 
   vars:
-    nginx_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 harbor_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行 URL
+    caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 harbor_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行 URL
     harbor_installer_cache: /var/cache/harbor-installer
     harbor_tgz_name: "harbor-offline-installer-{{ harbor_version }}.tgz"
     harbor_tgz_cached_path: "{{ harbor_installer_cache }}/{{ harbor_tgz_name }}"
@@ -58,7 +58,7 @@
     proxy_map: "{{ lookup('file', harbor_home + '/proxy_map.json') | from_json }}"
     harbor_project_quota_bytes: 16106127360 # 15GiB；8 個 proxy project × 15GiB = 120GiB，留約 30GB 給 postgres/redis/trivy + 邊際（vm_disk_harbor_gb 整顆抓 150GB）
     robot_name: mirror-puller
-    harbor_api_base: "http://127.0.0.1:{{ harbor_internal_http_port }}/api/v2.0" # 本機直連明文 HTTP，不透過 nginx-proxy——這支 playbook 本來就跑在 VM 自己身上，不需要繞一圈去過 TLS
+    harbor_api_base: "http://127.0.0.1:{{ harbor_internal_http_port }}/api/v2.0" # 本機直連明文 HTTP，不透過 caddy-proxy——這支 playbook 本來就跑在 VM 自己身上，不需要繞一圈去過 TLS
     harbor_secrets_dir: /srv/harbor/secrets # 執行期才生得出來的機密（robot secret）存這裡，root-only 可讀，對照這個專案 custom/.env 明文存機密的風格
 
   tasks:
@@ -66,7 +66,7 @@
 
     - name: '建立 harbor 這個 rootless 專屬系統使用者'
       ansible.builtin.include_tasks:
-        file: /srv/ansible/playbook/rootless_podman_user_setup.yml # 原始檔是 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著整棵 srv/ 樹裝機前由 control-panel/debian.yml 複製進 ISO——跟 nginx-proxy-install.yml 共用同一份
+        file: /srv/ansible/playbook/rootless_podman_user_setup.yml # 原始檔是 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著整棵 srv/ 樹裝機前由 control-panel/debian.yml 複製進 ISO——跟 caddy-proxy-install.yml 共用同一份
       vars:
         rootless_user_name: "{{ harbor_user }}"
         rootless_service_dirs:
@@ -159,7 +159,7 @@
       environment: "{{ rootless_podman_env }}"
       changed_when: true
 
-    - name: '移除 prepare 產出 docker-compose.yml 裡的 log service（image 內部用 sudo 切使用者，rootless 下讀不到 /etc/shadow 會 crash-loop；log 改走 journald），並把 proxy service 對外發布的埠限制在 127.0.0.1（Harbor 自己完全不對外，nginx-proxy 用 --network=host 連這個 loopback 埠，外部摸不到）'
+    - name: '移除 prepare 產出 docker-compose.yml 裡的 log service（image 內部用 sudo 切使用者，rootless 下讀不到 /etc/shadow 會 crash-loop；log 改走 journald），並把 proxy service 對外發布的埠限制在 127.0.0.1（Harbor 自己完全不對外，caddy-proxy 用 --network=host 連這個 loopback 埠，外部摸不到）'
       ansible.builtin.command: >
         yq -i '
           del(.services.log)
@@ -426,7 +426,7 @@
     - name: '印出結果（journalctl -u bootstrap-harbor 看得到這段；故意排在清掉一次性檔案之前——下面那個 task 會刪掉 harbor_runtime_vars.yml，這裡的 msg 用到的 harbor_hostname 就是從那個檔案的 vars_files 讀進來的，順序顛倒會直接噴 "harbor_hostname is undefined"，實機撞過）'
       ansible.builtin.debug:
         msg:
-          - "Harbor 已就緒：https://{{ harbor_hostname }}:{{ nginx_proxy_https_port }}（透過 nginx-proxy 連，不是 harbor_internal_http_port）"
+          - "Harbor 已就緒：https://{{ harbor_hostname }}:{{ caddy_proxy_https_port }}（透過 caddy-proxy 連，不是 harbor_internal_http_port）"
           - "admin 密碼就是 custom/.env 的 HARBOR_ADMIN_PASSWORD"
           - "robot 拉取帳號存在 {{ harbor_secrets_dir }}/robot-name、{{ harbor_secrets_dir }}/robot-secret（root-only 可讀）"
 

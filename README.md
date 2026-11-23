@@ -146,7 +146,7 @@ task clean         # 清掉 build 產物（keys 會額外二次確認）
 │   │   │                           # /srv 底下那些東西，工作目錄結構直接對齊最終 /srv 的結構）
 │   │   ├── template/                  # preseed.cfg.j2、debian.vmx.j2——不對應 VM 上任何路徑
 │   │   ├── bootstrap/                 # 對齊 VM 上 ~{{ vm_user }}/bootstrap/ 的結構
-│   │   └── srv/                       # 對齊 VM 上 /srv 的結構（srv/ansible/、srv/harbor/、srv/nginx/...）
+│   │   └── srv/                       # 對齊 VM 上 /srv 的結構（srv/ansible/、srv/harbor/、srv/caddy/...）
 │   ├── scripts/
 │   │   ├── remaster-iso/debian.sh     # 重新封裝 ISO（注入檔案、改開機自動選單）
 │   │   ├── verify-iso/debian.sh       # 驗證官方未竄改 ISO

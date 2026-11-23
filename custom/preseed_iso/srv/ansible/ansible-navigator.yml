@@ -1,6 +1,6 @@
 # ansible-navigator 的設定檔——bootstrap-services（Go 程式）呼叫
 # `ansible-navigator run --ee-vars-file ... harbor-install.yml`（或
-# nginx-proxy-install.yml）時，ansible-navigator 會自動找這個檔案（跟被執行的
+# caddy-proxy-install.yml）時，ansible-navigator 會自動找這個檔案（跟被執行的
 # playbook 放同一層，或用 ANSIBLE_NAVIGATOR_CONFIG 指到這裡）。
 #
 # mode: stdout（不是預設的 interactive TUI）——這支會被 bootstrap-services
@@ -38,9 +38,9 @@
 # "/usr" 這三個完整路徑的掛載（實機撞過
 # ansible_runner.exceptions.ConfigurationError: cannot mount '/' or '/home'
 # or '/usr'）。這兩支 playbook 真正需要寫進 /home 底下的只有 harbor_user/
-# nginx_proxy_user 這兩個 rootless 系統使用者各自的 home（寫
+# caddy_proxy_user 這兩個 rootless 系統使用者各自的 home（寫
 # ~/.config/systemd/user/*.service），兩個使用者名稱都是 control-panel/
-# debian.yml 寫死的常數（harbor / nginx-proxy，不是裝機時可改的輸入值），
+# debian.yml 寫死的常數（harbor / caddy-proxy，不是裝機時可改的輸入值），
 # 所以直接掛這兩條具體路徑，不用掛整個 /home。
 ansible-navigator:
   mode: stdout
@@ -63,7 +63,7 @@ ansible-navigator:
       # podman 當 CLI 參數，沒有這層額外驗證。
       #
       # 加 rslave 的原因：ansible-navigator 整個 playbook 執行期間只開一個
-      # 長駐的 EE 容器，容器啟動當下 harbor/nginx-proxy 的帳號可能還不存在，
+      # 長駐的 EE 容器，容器啟動當下 harbor/caddy-proxy 的帳號可能還不存在，
       # /run/user/<uid> 這個 tmpfs（systemd-logind 收到 loginctl
       # enable-linger 後才會掛，見 rootless_podman_user_setup.yml）當然也
       # 還不存在。podman 預設的 bind mount propagation 是 private，容器
@@ -86,16 +86,16 @@ ansible-navigator:
       - src: /home/harbor
         dest: /home/harbor
         options: rw
-      - src: /home/nginx-proxy
-        dest: /home/nginx-proxy
+      - src: /home/caddy-proxy
+        dest: /home/caddy-proxy
         options: rw
-      # harbor_home（/srv/harbor）、nginx_proxy_home（/srv/nginx）都在這裡
+      # harbor_home（/srv/harbor）、caddy_proxy_home（/srv/caddy）都在這裡
       # 底下——late_command 裝機當下已經把 harbor.yml/憑證/vhost conf 這些
       # 東西直接放進最終位置了（見 control-panel/debian.yml），harbor-install.yml/
-      # nginx-proxy-install.yml 要讀寫這些檔案。整個 /srv 掛進來，不是隻掛
-      # /srv/harbor、/srv/nginx 兩條——/srv/ansible（這份 playbook 自己的
+      # caddy-proxy-install.yml 要讀寫這些檔案。整個 /srv 掛進來，不是隻掛
+      # /srv/harbor、/srv/caddy 兩條——/srv/ansible（這份 playbook 自己的
       # 位置）本來就靠 ansible-navigator 自動掛 playbook 所在目錄才摸得到，
-      # 跟這裡的 volume-mounts 設定無關，但 /srv/harbor、/srv/nginx 是跟
+      # 跟這裡的 volume-mounts 設定無關，但 /srv/harbor、/srv/caddy 是跟
       # playbook 不同層的獨立子目錄，不會被那個自動行為一起帶到，必須自己
       # 明確掛——實機撞過 harbor-install.yml 收緊 harbor.yml 權限那個 task
       # 直接噴 "file (/srv/harbor/harbor.yml) is absent, cannot continue"，

@@ -1,0 +1,31 @@
+# Harbor 在獨立 nginx 反代（caddy-proxy）後面的 vhost 設定——TLS 在這裡
+# （caddy-proxy 容器內）終止，Harbor 自己完全不碰 TLS，只在 loopback 上講
+# 明文 HTTP（見 harbor.yml.j2）。裝機前在控制節點渲染好，隨 ISO 注入到
+# caddy-proxy 的 conf.d/，不是 Harbor 自己的檔案——Harbor 完全不知道自己
+# 被掛在哪個 hostname 後面。
+#
+# 路徑是容器內部路徑（/etc/nginx/...），不是 VM 主機上的路徑——caddy-proxy
+# 容器把 {{ caddy_proxy_home }}/certs、{{ caddy_proxy_home }}/conf.d 分別掛到
+# 容器內的 /etc/caddy/certs、/etc/nginx/conf.d（見 caddy-proxy-install.yml
+# 的 systemd unit）。
+#
+# caddy-proxy 容器跑 --network=host，listen 一定要明確寫 WireGuard 位址——
+# 不寫位址在 host network 下會變成監聽主機所有介面，繞過 sshd 那種「只綁
+# WireGuard 位址」的既有慣例。
+server {
+    listen {{ wireguard_vm_address }}:{{ caddy_proxy_https_port }} ssl;
+    server_name {{ harbor_hostname }};
+
+    ssl_certificate     /etc/caddy/certs/harbor.crt;
+    ssl_certificate_key /etc/caddy/certs/harbor.key;
+
+    client_max_body_size 0; # Harbor 推送大 image layer 不能卡 body size 限制
+
+    location / {
+        proxy_pass http://127.0.0.1:{{ harbor_internal_http_port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}

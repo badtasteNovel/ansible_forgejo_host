@@ -1,6 +1,6 @@
 # 建一個 rootless podman 專屬系統使用者（useradd + subuid/subgid + linger +
-# 服務目錄 + 驗證 podman 能動）。Harbor（harbor-install.yml）跟 nginx-proxy
-# （nginx-proxy-install.yml）都需要一模一樣的這套設置——容器逃逸拿不到主機
+# 服務目錄 + 驗證 podman 能動）。Harbor（harbor-install.yml）跟 caddy-proxy
+# （caddy-proxy-install.yml）都需要一模一樣的這套設置——容器逃逸拿不到主機
 # root，每個服務各自一個獨立使用者、彼此隔離——抽成共用 task fragment，
 # 避免兩份幾乎一樣的程式碼（以後每多一個用 podman 跑的服務，也是直接
 # include 這份，不用再複製貼上一次）。
@@ -116,7 +116,7 @@
     group: "{{ rootless_user_name }}"
     mode: "0750"
 
-- name: "cgroup_manager 改用 cgroupfs（harbor/nginx-proxy 各自用自己的 rootless podman 再啟動巢狀容器——harbor 是 goharbor/prepare，nginx-proxy 未來任何用 podman run 跑子容器的流程都一樣——預設的 systemd cgroup manager 會假設自己能直接摸到 /sys/fs/cgroup/user.slice 這種路徑，但這兩個都只是沒有真正主機級權限的 rootless 使用者，--privileged 在這裡只在它自己的 user namespace 內有效，沒辦法真的加入主機的 cgroup namespace——實機撞過 crun 直接噴 'create directory `/sys/fs/cgroup/.../user.slice`: No such file or directory: OCI runtime attempted to invoke a command that was not found'。改成 cgroupfs 之後 crun 直接操作它實際摸得到的 cgroup 檔案系統，不再假設一套它沒有權限建立的 systemd 式路徑——這個設定寫在 containers.conf，對這個使用者之後所有 podman 呼叫都生效，不用每個指令各自加 --cgroup-manager=cgroupfs，podman-compose 內部呼叫的每一個 podman run 也會一併吃到這個設定）"
+- name: "cgroup_manager 改用 cgroupfs（harbor/caddy-proxy 各自用自己的 rootless podman 再啟動巢狀容器——harbor 是 goharbor/prepare，caddy-proxy 未來任何用 podman run 跑子容器的流程都一樣——預設的 systemd cgroup manager 會假設自己能直接摸到 /sys/fs/cgroup/user.slice 這種路徑，但這兩個都只是沒有真正主機級權限的 rootless 使用者，--privileged 在這裡只在它自己的 user namespace 內有效，沒辦法真的加入主機的 cgroup namespace——實機撞過 crun 直接噴 'create directory `/sys/fs/cgroup/.../user.slice`: No such file or directory: OCI runtime attempted to invoke a command that was not found'。改成 cgroupfs 之後 crun 直接操作它實際摸得到的 cgroup 檔案系統，不再假設一套它沒有權限建立的 systemd 式路徑——這個設定寫在 containers.conf，對這個使用者之後所有 podman 呼叫都生效，不用每個指令各自加 --cgroup-manager=cgroupfs，podman-compose 內部呼叫的每一個 podman run 也會一併吃到這個設定）"
   ansible.builtin.copy:
     dest: "/home/{{ rootless_user_name }}/.config/containers/containers.conf"
     owner: "{{ rootless_user_name }}"
@@ -144,7 +144,7 @@
     group: "{{ rootless_user_name }}"
     mode: "0750"
 
-- name: "驗證 rootless podman 能動（確保後面的步驟不會卡在 linger/subuid 沒生效；故意不用 podman info——這支指令內部會另外去查詢 cgroup controller/libpod 設定目錄這類只有在真正走過 PAM session 註冊的行程下才會穩定成功的診斷資訊，用 become_user 這種單純切身份的呼叫方式跑，實機交叉驗證過多次：有時噴 'getting available cgroup controllers: ... no such file or directory'，有時噴 'mkdir /run/user/<uid>/libpod: permission denied'，兩種訊息在同一套環境下都出現過，顯然是 podman info 這個子指令自己對執行環境的假設跟這裡的呼叫方式不匹配，不是設定錯誤。podman ps 走的是完全不同的程式碼路徑，不會碰這些診斷查詢，而且是這份 playbook 後面幾個 task、以及 harbor-install.yml/nginx-proxy-install.yml 真正會用到的操作本身，用 podman pull/podman run 分別交叉測試過，在同樣的 become_user 呼叫方式、同樣的 ansible-navigator EE 容器環境下都穩定成功——podman ps 才是真正代表『rootless podman 能不能用』的查驗，不是 podman info 的診斷輸出）"
+- name: "驗證 rootless podman 能動（確保後面的步驟不會卡在 linger/subuid 沒生效；故意不用 podman info——這支指令內部會另外去查詢 cgroup controller/libpod 設定目錄這類只有在真正走過 PAM session 註冊的行程下才會穩定成功的診斷資訊，用 become_user 這種單純切身份的呼叫方式跑，實機交叉驗證過多次：有時噴 'getting available cgroup controllers: ... no such file or directory'，有時噴 'mkdir /run/user/<uid>/libpod: permission denied'，兩種訊息在同一套環境下都出現過，顯然是 podman info 這個子指令自己對執行環境的假設跟這裡的呼叫方式不匹配，不是設定錯誤。podman ps 走的是完全不同的程式碼路徑，不會碰這些診斷查詢，而且是這份 playbook 後面幾個 task、以及 harbor-install.yml/caddy-proxy-install.yml 真正會用到的操作本身，用 podman pull/podman run 分別交叉測試過，在同樣的 become_user 呼叫方式、同樣的 ansible-navigator EE 容器環境下都穩定成功——podman ps 才是真正代表『rootless podman 能不能用』的查驗，不是 podman info 的診斷輸出）"
   ansible.builtin.command: podman ps
   become: true
   become_user: "{{ rootless_user_name }}"

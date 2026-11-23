@@ -11,7 +11,7 @@ set -euo pipefail
 # 的信任鏈，見 Containerfile 跟 config.sh）。
 #
 # apply.sh 呼叫這支的時機要排在 ensure_ee_image 之前（squid 沒先跑起來，
-# EE build 連不出去）；跟 harbor.sh/nginx.sh 不一樣，這支不需要表單填的
+# EE build 連不出去）；跟 harbor.sh/caddy.sh 不一樣，這支不需要表單填的
 # 任何欄位，所以不用被 source 進去定義函式讓 apply.sh 呼叫——直接執行
 # 就好。
 #
@@ -19,7 +19,7 @@ set -euo pipefail
 # 不是放進 srv/init/（開機就自動跑、不需要人介入）：squid 唯一的消費者
 # ensure_ee_image() 本身就只會從 apply.sh 這條互動流程被呼叫到，沒有任何
 # 地方在開機當下自動建 EE image，所以 squid 沒有必要比 bootstrap-services
-# 更早就位——跟 harbor.sh/nginx.sh 同一個道理，簡單起見直接沿用一次性表單
+# 更早就位——跟 harbor.sh/caddy.sh 同一個道理，簡單起見直接沿用一次性表單
 # 流程的既有慣例就好。這也代表 podman-network.sh（srv/init/，開機就自動
 # 跑）這時早就跑完了，ansible-builder-network 這個 network 的*設定*
 # 已經存在——但這支腳本不需要在乎這個 network 的 gateway IP

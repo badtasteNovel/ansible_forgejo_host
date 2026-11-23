@@ -5,7 +5,7 @@
 # 要用的 port，還有 ufw 規則要用的來源子網）。
 harbor_admin_password: "{{ harbor_admin_password }}"
 harbor_internal_http_port: {{ harbor_internal_http_port }} # Harbor 自己只在 127.0.0.1 上講明文 HTTP 的那個埠，不是對外埠
-harbor_hostname: "{{ harbor_hostname }}" # client 端實際連線用的名字（nginx-proxy 後面的 vhost），不是 Harbor 自己 bind 的位址
+harbor_hostname: "{{ harbor_hostname }}" # client 端實際連線用的名字（caddy-proxy 後面的 vhost），不是 Harbor 自己 bind 的位址
 harbor_version: "{{ harbor_version }}"
 harbor_user: "{{ harbor_user }}"
 harbor_home: "{{ harbor_home }}"

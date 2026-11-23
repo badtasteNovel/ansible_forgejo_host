@@ -30,16 +30,18 @@ harbor_setup() {
   if [ "$INSTALL_HARBOR" = "true" ]; then
     echo "==> 開始在本機安裝 Harbor（ansible-navigator run harbor-install.yml）..."
 
-    # /home/harbor、/home/nginx-proxy 兩個目錄已經在 apply.sh 裡集中建好了
+    # /home/harbor、/home/caddy-proxy 兩個目錄已經在 apply.sh 裡集中建好了
     # （ansible-navigator.yml 的 volume-mounts 是共用設定，驗證的是清單裡
     # 全部的來源路徑，不只是這次用到的那一個），這裡不用再處理。
 
     run_navigator "$HARBOR_PLAYBOOK"
 
-    # HARBOR_HOSTNAME 是 bootstrap-services 表單問出來的（預設值用這台機器
-    # 自己的 hostname 組，使用者可以直接接受或改掉），由 apply.sh 設成環境
-    # 變數傳進來，這支不重新問、不重新算。
-    harbor_registry="${HARBOR_HOSTNAME}:${NGINX_PROXY_HTTPS_PORT}"
+    # HARBOR_HOSTNAME 是 bootstrap-services 表單問出來的（預設值直接讀
+    # /srv/harbor/harbor.yml 的 hostname 欄位——裝機時就烘焙好的真實值，
+    # 固定是 "harbor.internal"、不帶 vm_name，使用者可以直接接受或改掉，
+    # 見 main.go 的 readHarborHostnameDefault() 說明），由 apply.sh 設成
+    # 環境變數傳進來，這支不重新問、不重新算。
+    harbor_registry="${HARBOR_HOSTNAME}:${CADDY_PROXY_HTTPS_PORT}"
 
     cp "$LOCAL_HARBOR_CA_PATH" "$LOCAL_CA_TRUST_PATH"
     update-ca-certificates

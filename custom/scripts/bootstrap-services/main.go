@@ -15,7 +15,7 @@ import (
 // 已經存在的外部 Harbor）」，把答案整理成 JSON，丟給同一個資料夾裡
 // services/apply.sh 去做真正的工作（pull image、podman login、寫
 // registries.conf.d、跑 ansible-navigator……——apply.sh 自己又拆成
-// env.sh/harbor.sh/nginx.sh 幾支，見各自開頭的說明）。這些事交給 shell 來做
+// env.sh/harbor.sh/caddy.sh 幾支，見各自開頭的說明）。這些事交給 shell 來做
 // 比較自然——curl/jq/podman 這些指令列工具本來就是殼層的拿手戲，不需要在
 // Go 裡面包一層又一層去重做 shell 工具已經做得很好的事。Go 負責的部分只剩
 // 「表單」這個 shell 做不好的事。
@@ -71,7 +71,7 @@ func main() {
 				Value(&ans.WireguardVMAddress),
 			huh.NewNote().
 				Title("設定這台 VM 的 Harbor pull-through cache").
-				Description("nginx-proxy 一定會裝；Harbor 是選用的——可以在本機裝一份，也可以接一個已經存在的外部 Harbor。"),
+				Description("caddy-proxy 一定會裝；Harbor 是選用的——可以在本機裝一份，也可以接一個已經存在的外部 Harbor。"),
 			huh.NewConfirm().
 				Title("要在本機安裝 Harbor 嗎？").
 				Value(&ans.InstallHarbor),
@@ -88,15 +88,23 @@ func main() {
 	}
 
 	if ans.InstallHarbor {
-		// 固定預設值，不用查機器自己的 hostname——大部分情況一個叢集/一台
-		// VM 也只會裝一個 Harbor，不需要每台各自取不一樣的名字，使用者要
-		// 改再自己改就好。
-		ans.HarborHostname = "harbor.internal"
+		// 預設值直接讀 /srv/harbor/harbor.yml 的 hostname 欄位——那份檔案是
+		// control-panel/debian.yml 裝機前就渲染好、隨 ISO 注入的（harbor_hostname
+		// 變數現在固定是 "harbor.internal"，不帶 vm_name——沒有真正的 DNS，
+		// 每台 peer 自己在本機 hosts 檔案把這個名字指到當下連的那台 VM，同一個
+		// 名字在不同電腦上可以指向不同機器），跟 harbor.yml 自己的
+		// hostname/external_url、TLS 憑證的 CN/SAN 用的是同一個值，是唯一真正
+		// 跟實際設定一致的來源。這裡故意不自己寫一個字串常數——雖然現在
+		// harbor_hostname 的值固定、不再因 VM 而異，但直接讀檔案還是比在兩個
+		// 地方各自寫一次同一個字串更不容易再度脫鉤（以後 debian.yml 那邊的
+		// 值要是改了，這裡不用跟著改）。讀檔案失敗（理論上不該發生，這份
+		// 檔案裝機當下就該存在）才退回舊的固定字串，至少讓表單還能動。
+		ans.HarborHostname = readHarborHostnameDefault()
 
 		hostnameForm := huh.NewForm(
 			huh.NewGroup(
 				huh.NewInput().
-					Title("本機 Harbor 要用的 hostname（nginx-proxy 後面的 vhost 名稱）").
+					Title("本機 Harbor 要用的 hostname（caddy-proxy 後面的 vhost 名稱）").
 					Description("已經帶入預設值，直接 Enter 接受就好，或自己改。").
 					Value(&ans.HarborHostname),
 			),
@@ -156,10 +164,34 @@ func main() {
 	}
 
 	// 跑完就自刪——這是一次性安裝程式，不是常駐工具，留著只會變成一支隨時
-	// 可以重新觸發 Harbor/nginx-proxy 安裝流程的程式。exe 是最前面已經查過
+	// 可以重新觸發 Harbor/caddy-proxy 安裝流程的程式。exe 是最前面已經查過
 	// 的執行檔路徑，不用再查一次。
 	os.RemoveAll(servicesDir)
 	if err := os.Remove(exe); err != nil {
 		fmt.Fprintf(os.Stderr, "警告：自我刪除失敗，手動刪掉 %s 比較安全：%v\n", exe, err)
 	}
+}
+
+// 從 /srv/harbor/harbor.yml 讀 hostname 欄位當表單預設值——這份檔案裝機時
+// 就已經注入好，格式固定是 "hostname: <值>" 單獨一行、沒有引號（見
+// harbor.yml.j2），直接找這一行、取冒號後面的部分即可，不需要真的解析
+// 整份 YAML。讀不到就退回舊的固定字串，讓表單至少還能用。
+func readHarborHostnameDefault() string {
+	const fallback = "harbor.internal"
+	data, err := os.ReadFile("/srv/harbor/harbor.yml")
+	if err != nil {
+		return fallback
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		rest, ok := strings.CutPrefix(line, "hostname:")
+		if !ok {
+			continue
+		}
+		hostname := strings.TrimSpace(rest)
+		if hostname != "" {
+			return hostname
+		}
+	}
+	return fallback
 }
