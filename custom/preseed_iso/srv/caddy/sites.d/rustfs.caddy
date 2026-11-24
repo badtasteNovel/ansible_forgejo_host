@@ -1,0 +1,30 @@
+# RustFS 的 site 設定——跟 harbor.caddy 不一樣，這份完全沒有變數，純靜態，
+# 不用 Jinja 渲染，所以沒有 .caddy.j2 副檔名（跟主設定檔 Caddyfile 同一個
+# 道理，見那份檔案自己的說明）：RustFS 是強制功能（跟 caddy-proxy 一樣每台
+# VM 都裝，不是開機後表單問出來的），hostname 也是寫死常數，不像 Harbor
+# 的 hostname 要等開機後表單填才知道，裝機前就能把這份檔案連同整棵 srv/
+# 樹一起放進 ISO，不需要等 rustfs-install.yml 在 VM 上才現場渲染。
+#
+# RustFS 同時有兩個對外角色、兩個不同的內部埠（見官方 docker-compose 範例：
+# S3 API 預設 9000、web 主控台預設 9001，兩者分開監聽，不像 Harbor 自己的
+# nginx 已經把 UI 跟 registry API 統一在同一個埠底下）——這裡用兩個不同的
+# hostname、同一個 caddy-proxy 容器實際監聽的埠（8443，跟 debian.yml/
+# caddy-proxy-install.yml 裡 caddy_proxy_internal_port 這個常數同一個值，
+# 這份檔案本身沒有變數，這裡直接寫數字——因為 caddy-proxy 整個容器只對外
+# 發布這一個埠，所有 site 都共用它，靠 Host header 分流），
+# 分別反代到 RustFS 容器自己的兩個埠。兩個 site 都用 tls internal，共用
+# 同一張 Caddy 自己生成的本地 CA（見 caddy-proxy-install.yml 的說明）。
+#
+# reverse_proxy 目標是 10.0.2.2，不是 127.0.0.1：跟 harbor.caddy 同一個
+# 道理——10.0.2.2 是 caddy-proxy 容器自己的 slirp4netns allow_host_loopback
+# 固定 gateway 位址，用來連回主機的 127.0.0.1（RustFS 自己只在主機的
+# 127.0.0.1 上發布這兩個埠，見 rustfs-install.yml）。
+rustfs.internal:8443 {
+	tls internal
+	reverse_proxy 10.0.2.2:9001
+}
+
+rustfs-s3.internal:8443 {
+	tls internal
+	reverse_proxy 10.0.2.2:9000
+}

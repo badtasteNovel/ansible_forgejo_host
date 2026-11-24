@@ -1,0 +1,52 @@
+#!/bin/bash
+set -euo pipefail
+
+# 把 RustFS 的資料定期備份到 NAS（CIFS/SMB share）——這支腳本跑在主機
+# root 身份（systemd system 層級的 timer/service，不是 rootless 的
+# rustfs 使用者，見 rustfs-install.yml 裡寫的 rustfs-backup.service/
+# .timer），因為 mount.cifs 本身就需要真正的 root 權限，rootless 使用者
+# 做不到。
+#
+# 這支是裝機前就渲染好、連同帳密一起烘焙進 ISO 的（custom/.env 的
+# NAS_IP/NAS_ACCOUNT/NAS_PASSWORD/NAS_DIRECTORY，build time 就知道，跟
+# HARBOR_ADMIN_PASSWORD 待遇一樣），不是像 harbor.yml 那種要等開機後表單
+# 填值才能渲染的東西——NAS 連線資訊從一開始就是固定的，不需要等任何
+# runtime 才知道的值。原始 .j2 樣板渲染完就被 control-panel/debian.yml
+# 清掉（見該檔案「清掉 srv/ 底下還留著 .j2 副檔名的原始樣板」那個 task），
+# 不會跟著渲染好的這份一起留在 VM 上。
+#
+# NAS_DIRECTORY 是 CIFS/SMB 的 share 名稱，不是本機路徑——實際 mount 的
+# UNC 路徑組出來是 //{{ nas_ip }}/{{ nas_directory }}，這點沒有對著真實
+# NAS 測過，用的是一般 CIFS mount 的慣例語法，第一次在真機上跑建議留意
+# mount 這一步的輸出。
+#
+# 故意不加 --delete：RustFS 這邊存的是網站的資料庫備份（含多年份的
+# columnar 備份）、目前網站資料、各種報表、其他服務（例如 forgejo-db）的
+# 備份，這些東西的價值就是「保留歷史」，NAS 這份只是再往外一層的災難
+# 備援副本——如果 RustFS 本機端哪天因為任何原因少了某個檔案（不管是真的
+# 不需要了還是誤刪），不應該讓這支腳本自動把 NAS 上那份也刪掉，讓備援
+# 失去意義。這代表 NAS 端只會累積、不會自動清掉舊資料，容量要自己注意，
+# 真的需要清的話手動處理。
+
+MOUNT_POINT=/mnt/rustfs-nas-backup
+CREDENTIALS_FILE=/srv/rustfs/cronjob/nas-credentials
+
+mkdir -p "$MOUNT_POINT"
+
+# credentials 檔案（username=.../password=...）跟這支腳本一樣是裝機前就
+# 渲染好、烘焙進 ISO 的，見下面緊接著這個同一份 cronjob/ 目錄——用
+# -o credentials= 而不是直接在 mount 指令的 -o 裡面寫
+# username=xxx,password=xxx，是為了不讓密碼整串出現在這支腳本自己的
+# 指令列上（ps aux/journalctl 都看得到指令列參數，但看不到這個檔案的
+# 內容）。
+mount -t cifs "//{{ nas_ip }}/{{ nas_directory }}" "$MOUNT_POINT" \
+  -o credentials="$CREDENTIALS_FILE",vers=3.0,uid=0,gid=0,file_mode=0600,dir_mode=0700
+
+# trap 確保這支腳本不管成功或失敗結束，mount 點都會被卸載——備份腳本
+# 掛著一個 NAS share 不卸載，下次 cron 觸發時不乾淨的殘留掛載點會讓
+# mount 指令本身失敗，而不是真的去 cron 重新 mount 一次。
+trap 'umount "$MOUNT_POINT" 2>/dev/null || true' EXIT
+
+rsync -a "{{ vm_rustfs_mount_path }}/rustfs0/" "$MOUNT_POINT/rustfs-backup/"
+
+echo "RustFS 備份到 NAS 完成：$(date -Is)"

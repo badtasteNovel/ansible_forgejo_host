@@ -89,7 +89,11 @@ d-i base-installer/kernel/image string linux-image-amd64
 ### 裝在 Containerfile 裡（EE 容器只在裝機後 bootstrap-services 跑設置
 ### playbook 時用得到，常駐服務的生命週期比它長得多）。
 tasksel tasksel/first multiselect standard
-d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible pipx jq curl squid-openssl vim uidmap
+### cifs-utils（mount.cifs，RustFS 排程備份到 NAS 要掛 SMB/CIFS share 用）、
+### rsync（同一個備份腳本拿來把 RustFS 的資料同步過去）——這兩個都是給
+### srv/rustfs/cronjob/backup-to-nas.sh 這支 root 身份跑的腳本用，不是
+### rootless 使用者的事，所以裝在主機這邊，不是 Containerfile。
+d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible pipx jq curl squid-openssl vim uidmap cifs-utils rsync
 d-i pkgsel/upgrade select none
 popularity-contest popularity-contest/participate boolean false
 
@@ -182,6 +186,12 @@ d-i preseed/late_command string \
   mkfs.ext4 -F /dev/sdc1; \
   mkdir -p /target{{ vm_harbor_mount_path }}; \
   echo "UUID=$(blkid -s UUID -o value /dev/sdc1) {{ vm_harbor_mount_path }} ext4 defaults,nofail 0 2" >> /target/etc/fstab; \
+  parted -s /dev/sdd mklabel gpt mkpart primary ext4 0% 100%; \
+  partprobe /dev/sdd; \
+  udevadm settle; \
+  mkfs.ext4 -F /dev/sdd1; \
+  mkdir -p /target{{ vm_rustfs_mount_path }}; \
+  echo "UUID=$(blkid -s UUID -o value /dev/sdd1) {{ vm_rustfs_mount_path }} ext4 defaults,nofail 0 2" >> /target/etc/fstab; \
   parted -s /dev/sdb mklabel gpt mkpart primary ext4 0% 100%; \
   partprobe /dev/sdb; \
   udevadm settle; \

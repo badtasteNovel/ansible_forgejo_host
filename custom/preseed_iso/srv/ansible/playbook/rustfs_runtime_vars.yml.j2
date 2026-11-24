@@ -1,0 +1,20 @@
+# rustfs-install.yml 要用的值——裝機前在控制節點就全部知道，這裡整份
+# 渲染好注入 ISO，rustfs-install.yml 用 vars_files 讀這個檔案，不用自己
+# 猜/寫死。跟 harbor_runtime_vars.yml 同一個道理：這份不是 RustFS 自己讀
+# 的設定檔（RustFS 完全靠環境變數設定，沒有設定檔），是給
+# rustfs-install.yml 這支 Ansible playbook 自己用的（root 帳密這種機密，
+# build time 就知道的其他值則直接寫在 rustfs-install.yml 自己的 vars:
+# 裡，不需要特別經過這份檔案——跟 caddy-proxy-install.yml 把
+# caddy_proxy_internal_port 當自己的 vars 常數同一個道理）。
+#
+# wireguard_vm_address 沒有放進來：rustfs-install.yml 完全不需要知道這個
+# 值——RustFS 自己兩個埠都只綁 127.0.0.1（見 rustfs-install.yml），不像
+# caddy-proxy 需要明確綁 {{ '{{' }} wireguard_vm_address {{ '}}' }} 才能把
+# 443 的 REDIRECT 規則對上監聽的 socket，RustFS 完全不碰對外的埠，這層
+# 轉換跟它無關。
+rustfs_access_key: "{{ rustfs_access_key }}"
+rustfs_secret_key: "{{ rustfs_secret_key }}" # 跟 rustfs_access_key 同一批，從 custom/.env 的 RUSTFS_ACCESS_KEY/RUSTFS_SECRET_KEY 來，build time 就知道
+rustfs_version: "{{ rustfs_version }}"
+rustfs_user: "{{ rustfs_user }}"
+rustfs_home: "{{ rustfs_home }}"
+vm_rustfs_mount_path: "{{ vm_rustfs_mount_path }}"

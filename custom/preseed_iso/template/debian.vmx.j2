@@ -38,6 +38,11 @@ scsi0:1.deviceType = "scsi-hardDisk"
 scsi0:2.present = "TRUE"
 scsi0:2.fileName = "{{ vm_name }}-harbor.vmdk"
 scsi0:2.deviceType = "scsi-hardDisk"
+# 第四顆碟（RustFS 用）無條件建立——RustFS 跟 caddy-proxy 一樣是強制功能，
+# 每台 VM 都裝，跟第三顆碟（Harbor）待遇一樣不需要看任何旗標。
+scsi0:3.present = "TRUE"
+scsi0:3.fileName = "{{ vm_name }}-rustfs.vmdk"
+scsi0:3.deviceType = "scsi-hardDisk"
 
 ide1:0.present = "TRUE"
 ide1:0.deviceType = "cdrom-image"

@@ -3,10 +3,11 @@ set -euo pipefail
 
 # bootstrap-services（Go 表單）把使用者填的答案用 JSON 丟到這支腳本的 stdin。
 # 這支只負責最上層的流程編排：裝好 ansible-navigator、建
-# EE image、依序處理 harbor.sh（Harbor 的安裝/CA/登入/mirror 設定）跟
-# caddy.sh（裝 caddy-proxy），最後印結果。每個服務自己的細節都拆到各自的
-# .sh，這支不重複寫那些邏輯——好處是以後要新增別的服務，一樣是「寫一支
-# 新的 xxx.sh + 在這裡多呼叫一行」，不用動既有服務的程式碼。
+# EE image、依序處理 harbor.sh（Harbor 的安裝/CA/登入/mirror 設定）、
+# caddy.sh（裝 caddy-proxy）、rustfs.sh（裝 RustFS + 啟動 NAS 備份排程），
+# 最後印結果。每個服務自己的細節都拆到各自的 .sh，這支不重複寫那些邏輯
+# ——好處是以後要新增別的服務，一樣是「寫一支新的 xxx.sh + 在這裡多呼叫
+# 一行」，不用動既有服務的程式碼（RustFS 就是照這個模式新增的第三個例子）。
 #
 # harbor.sh 是用 source 讀進來、再明確呼叫 harbor_install/harbor_finalize
 # 這兩個函式——不是當子行程執行。跟 config.sh 的慣例一致：source 只負責
@@ -63,19 +64,20 @@ ensure_navigator_tools
 ensure_ee_image
 
 # ansible-navigator.yml 的 volume-mounts 是一份共用設定，同時列了
-# /home/harbor 跟 /home/caddy-proxy——不管接下來實際跑的是
-# harbor-install.yml 還是 caddy-proxy-install.yml，ansible-navigator 自己
-# 在容器啟動前都會檢查這份清單裡*全部*的來源路徑存在，不只是當次用到的
-# 那一個（實機撞過 "Source: '/home/caddy-proxy' does not exist"，發生在
-# 跑 harbor-install.yml 的時候，因為 /home/caddy-proxy 要等 caddy.sh 才會
-# 建）。這裡集中建好兩個目錄，不要分散到 harbor.sh/caddy.sh 各自只顧自己
-# 那一個：harbor.sh 原本的 mkdir 包在 INSTALL_HARBOR=true 分支裡，使用者
-# 選接外部既有 Harbor 的話根本不會執行到，等 caddy.sh 呼叫 run_navigator
-# 時一樣會死在 /home/harbor 不存在——這個集中寫法兩種情境都會先建好，不用
-# 看 INSTALL_HARBOR 的值。harbor/caddy-proxy 是 control-panel/debian.yml
-# 寫死的 rootless 使用者名稱常數，跟 ansible-navigator.yml 裡的掛載路徑
-# 一致，這裡直接寫字串、不透過樣板傳。
-mkdir -p /home/harbor /home/caddy-proxy
+# /home/harbor、/home/caddy-proxy、/home/rustfs——不管接下來實際跑的是
+# harbor-install.yml、caddy-proxy-install.yml 還是 rustfs-install.yml，
+# ansible-navigator 自己在容器啟動前都會檢查這份清單裡*全部*的來源路徑
+# 存在，不只是當次用到的那一個（實機撞過 "Source: '/home/caddy-proxy'
+# does not exist"，發生在跑 harbor-install.yml 的時候，因為 /home/caddy-proxy
+# 要等 caddy.sh 才會建）。這裡集中建好三個目錄，不要分散到 harbor.sh/
+# caddy.sh/rustfs.sh 各自只顧自己那一個：harbor.sh 原本的 mkdir 包在
+# INSTALL_HARBOR=true 分支裡，使用者選接外部既有 Harbor 的話根本不會執行
+# 到，等 caddy.sh 呼叫 run_navigator 時一樣會死在 /home/harbor 不存在——
+# 這個集中寫法所有情境都會先建好，不用看 INSTALL_HARBOR 的值。
+# harbor/caddy-proxy/rustfs 是 control-panel/debian.yml 寫死的 rootless
+# 使用者名稱常數，跟 ansible-navigator.yml 裡的掛載路徑一致，這裡直接寫
+# 字串、不透過樣板傳。
+mkdir -p /home/harbor /home/caddy-proxy /home/rustfs
 
 # 先宣告成空字串，純粹是給人看的文件（標示「這支腳本最後會用到這個變數」），
 # 不影響行為——harbor_setup 執行完之後會直接覆寫成真正的值，沒有加這行
@@ -91,6 +93,11 @@ harbor_install
 
 harbor_finalize
 
+# RustFS 排在最後——它不依賴 Harbor/caddy-proxy 任何東西（見 rustfs.sh
+# 自己的說明），純粹是把新服務接在既有流程最後面，不打擾既有 Harbor 那幾步
+# 互相依賴的順序。
+"$SCRIPT_DIR/rustfs.sh"
+
 echo ""
 echo "全部裝完了："
 if [ "$INSTALL_HARBOR" = "true" ]; then
@@ -99,3 +106,4 @@ else
   echo "  已接上外部 Harbor：${harbor_registry}"
 fi
 echo "  caddy-proxy：https://${WIREGUARD_VM_ADDRESS}:${CADDY_PROXY_HTTPS_PORT}"
+echo "  RustFS：https://rustfs.internal（主控台）、https://rustfs-s3.internal（S3 API）"

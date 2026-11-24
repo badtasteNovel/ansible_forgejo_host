@@ -1,0 +1,229 @@
+---
+# RustFS 安裝 playbook——跟 caddy-proxy 一樣，這支是強制功能，不是使用者
+# 在 bootstrap-services 表單裡自己選的，每台 VM 都裝；跟 Harbor 不一樣，
+# 這支完全沒有「本機裝還是接外部既有的」這種分支。用 ansible-navigator
+# 執行（見 ansible-navigator.yml/Containerfile），跑在 VM 自己身上
+# （hosts: localhost, connection: local），由 apply.sh 呼叫
+# custom/preseed_iso/bootstrap/services/rustfs.sh 觸發（見該檔案開頭
+# 說明，為什麼這支只負責「把 RustFS 架起來」，NAS 備份排程的啟用留給
+# rustfs.sh 自己做）。
+#
+# RustFS 是 S3 相容的物件儲存（Rust 寫的，MinIO 的替代品），這台 VM 用它
+# 存網站的資料庫備份（含多年份的 columnar 備份）、目前網站資料、各種
+# 報表、其他服務（例如 forgejo-db）的備份——跟 Harbor 的 proxy-cache 性質
+# 完全不同：Harbor 存的是可以隨時重新 pull 的鏡像快取（丟了最多重新拉一次
+# image），RustFS 存的是這台 VM 唯一的一份長期資料，這也是為什麼它需要
+# 自己獨立一顆專用資料碟（見 debian.yml 的 vm_disk_rustfs_gb），而且有
+# 自己排程備份到 NAS 的機制（見 custom/preseed_iso/srv/rustfs/cronjob/，
+# Harbor 完全沒有這種東西）。
+#
+# 全程以 rustfs 這個 rootless 專屬系統使用者的身份跑 podman（容器逃逸拿不到
+# 主機 root，也跟 harbor/caddy-proxy 使用者彼此隔離），rootless 使用者設置
+# 那段跟 harbor-install.yml/caddy-proxy-install.yml 共用同一份
+# custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml。
+#
+# RustFS 容器網路：不需要像 caddy-proxy 那樣用
+# slirp4netns:allow_host_loopback=true——那個選項是給「需要連回主機
+# loopback 的容器」用的（caddy-proxy 要摸到 Harbor/RustFS 這些綁在
+# 127.0.0.1 的服務），RustFS 自己只需要被連、不需要主動連任何東西，用
+# podman 預設的 rootless 網路 + -p 127.0.0.1:<port>:<port> 明確發布就夠了
+# ——跟 Harbor 自己的 nginx-photon 容器待遇一樣（Harbor 用 podman-compose
+# 的預設網路，一樣只綁 127.0.0.1，見 harbor-install.yml）。對外（caddy-proxy
+# 要連進來）靠 slirp4netns 的固定 gateway 位址 10.0.2.2 連到這裡綁的
+# 127.0.0.1，細節見 srv/caddy/sites.d/rustfs.caddy 自己的說明。
+#
+# 兩個埠，兩個角色：9000 是 S3 API（給 S3 SDK/mc 之類的用戶端拉推資料），
+# 9001 是 web 主控台（給人用瀏覽器管理）。兩個都只綁 127.0.0.1，不直接對
+# 外，TLS 跟對外路徑統一交給 caddy-proxy（見 rustfs.caddy，各自有自己的
+# hostname）。這兩個埠號、docker-compose 範例的環境變數命名（RUSTFS_*）、
+# 單機單碟部署用 RUSTFS_VOLUMES 填一個單純路徑（不需要 {n...m} 這種多碟
+# 展開語法）這幾點，都是查官方文件/docker-compose 範例得到的，不是猜的，
+# 但沒有對著真正跑起來的 RustFS 驗證過，第一次在真機上跑建議留意。
+
+- name: '在 VM 上把 RustFS 架起來（podman，rootless，S3 相容物件儲存）'
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - /srv/ansible/playbook/rustfs_runtime_vars.yml
+
+  vars:
+    rustfs_data_dir: "{{ vm_rustfs_mount_path }}/rustfs0" # 單機單碟部署，RUSTFS_VOLUMES 填這個單純路徑即可，不需要 {0...3} 這種多碟展開語法（那是給同一台主機上真的有多顆碟要讓 RustFS 自己做 erasure coding 的情境用的，這裡只有一顆專用資料碟）
+    rustfs_s3_port: 9000 # S3 API，寫死常數——跟 caddy_proxy_internal_port 待遇一樣，查官方文件得到的標準埠，不是每台 VM 不一樣的東西
+    rustfs_console_port: 9001 # web 主控台
+    rustfs_image: "docker.io/rustfs/rustfs:{{ rustfs_version }}"
+
+  tasks:
+    # ────────────────────────── rootless 使用者 ──────────────────────────
+
+    - name: '建立 rustfs 這個 rootless 專屬系統使用者'
+      ansible.builtin.include_tasks:
+        file: /srv/ansible/playbook/rootless_podman_user_setup.yml # 原始檔是 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著整棵 srv/ 樹裝機前由 control-panel/debian.yml 複製進 ISO——這支 playbook 跑在 VM 上，摸不到控制節點的 repo，只能吃注入進來的這份
+      vars:
+        rootless_user_name: "{{ rustfs_user }}"
+        # 故意不包含 {{ rustfs_home }}（/srv/rustfs）：跟 Harbor/caddy-proxy
+        # 不一樣，RustFS 容器完全不需要寫任何東西進 rustfs_home——它只寫
+        # vm_rustfs_mount_path 底下的資料目錄，rustfs_home 底下只有
+        # cronjob/（NAS 備份腳本 + CIFS 帳密），這些是 root 身份的
+        # rustfs-backup.service 要用的東西，刻意不讓 rustfs 這個 rootless
+        # 使用者（容器逃逸後拿到的身份）有權限讀——如果把 rustfs_home 也
+        # 放進這份清單，這支 fragment 會把整個 /srv/rustfs 遞迴 chown 給
+        # rustfs，連 NAS 帳密都會變成容器逃逸後讀得到的東西，等於讓備援
+        # 目標本身也暴露在同一個信任邊界裡，失去 rootless 隔離的意義。
+        rootless_service_dirs:
+          - "{{ vm_rustfs_mount_path }}"
+
+    # ────────────────────────── 起服務 ──────────────────────────
+
+    - name: '確保 RustFS 資料目錄存在（{{ vm_rustfs_mount_path }} 這顆專用資料碟本身由 preseed late_command 裝機時就格式化、掛好了，見 debian.vmx.j2/preseed.cfg.j2；這裡只是在它底下建 RustFS 自己要用的子目錄，單機單碟用不到 {0...3} 展開，固定一個 rustfs0 子目錄就好）'
+      ansible.builtin.file:
+        path: "{{ rustfs_data_dir }}"
+        state: directory
+        owner: "{{ rustfs_user }}"
+        group: "{{ rustfs_user }}"
+        mode: "0750"
+
+    - name: 'pull RustFS image'
+      ansible.builtin.command: podman pull {{ rustfs_image }}
+      become: true
+      become_user: "{{ rustfs_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: true
+
+    - name: '建 ~rustfs/.config/systemd/user/（daemon-reload 前要先有目錄）'
+      ansible.builtin.file:
+        path: "/home/{{ rustfs_user }}/.config/systemd/user"
+        state: directory
+        owner: "{{ rustfs_user }}"
+        group: "{{ rustfs_user }}"
+        mode: "0750"
+
+    - name: '把 root 帳密寫進一個獨立的 env 檔案，不直接寫進 systemd unit 的 ExecStart 指令列——跟這個專案一路的習慣一致（SSHPASS 用環境變數不用 -p、podman login 用 --password-stdin 不用 --password）：ExecStart 這行本身是 ps aux/systemctl status/journalctl 隨便都看得到的東西，密碼放這裡等於明文攤在任何能看到行程列表的人面前；--env-file 指到的這個檔案本身設成 0600、只有 rustfs 自己讀得到，podman 讀完內容直接注入容器環境變數，密碼不會經過任何指令列參數'
+      ansible.builtin.copy:
+        dest: "/home/{{ rustfs_user }}/.config/rustfs.env"
+        owner: "{{ rustfs_user }}"
+        group: "{{ rustfs_user }}"
+        mode: "0600"
+        content: |
+          RUSTFS_ACCESS_KEY={{ rustfs_access_key }}
+          RUSTFS_SECRET_KEY={{ rustfs_secret_key }}
+
+    - name: '裝 systemd **user** unit（~rustfs/.config/systemd/user，靠 linger 開機自動起）'
+      ansible.builtin.copy:
+        dest: "/home/{{ rustfs_user }}/.config/systemd/user/rustfs.service"
+        owner: "{{ rustfs_user }}"
+        group: "{{ rustfs_user }}"
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=RustFS object storage (rootless podman, S3-compatible, TLS termination via caddy-proxy)
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStartPre=-/usr/bin/podman rm -f rustfs
+          ExecStart=/usr/bin/podman run -d --name rustfs \
+            -p 127.0.0.1:{{ rustfs_s3_port }}:{{ rustfs_s3_port }} \
+            -p 127.0.0.1:{{ rustfs_console_port }}:{{ rustfs_console_port }} \
+            -v {{ rustfs_data_dir }}:/data:z,rw \
+            --env-file /home/{{ rustfs_user }}/.config/rustfs.env \
+            -e RUSTFS_VOLUMES=/data \
+            -e RUSTFS_ADDRESS=0.0.0.0:{{ rustfs_s3_port }} \
+            -e RUSTFS_CONSOLE_ADDRESS=0.0.0.0:{{ rustfs_console_port }} \
+            -e RUSTFS_CONSOLE_ENABLE=true \
+            {{ rustfs_image }}
+          ExecStop=/usr/bin/podman stop rustfs
+          Restart=on-failure
+          RestartSec=15
+
+          [Install]
+          WantedBy=default.target
+
+    - name: 'systemctl --user daemon-reload + enable + start rustfs.service'
+      ansible.builtin.command: "{{ item }}"
+      become: true
+      become_user: "{{ rustfs_user }}"
+      environment: "{{ rootless_podman_env }}"
+      changed_when: true
+      loop:
+        - systemctl --user daemon-reload
+        - systemctl --user enable --now rustfs.service
+
+    - name: '確認 RustFS 真的開始服務了（跟 caddy-proxy-install.yml 同一個理由，直接用 wait_for 量測 TCP port，不透過 podman CLI 的自我回報——見那支 playbook 裡那個同名 task 的完整說明）'
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ item }}"
+        timeout: 300 # 跟其他幾個 wait_for 一樣：一旦 port 通了就立刻回來，拉長不影響正常等待時間
+      loop:
+        - "{{ rustfs_s3_port }}"
+        - "{{ rustfs_console_port }}"
+
+    # ────────────────────────── NAS 備份排程（只寫檔案，不啟用）──────────────────────────
+    # 這裡只負責把 systemd system 層級的 rustfs-backup.service/.timer 寫好、
+    # daemon-reload，故意不在這裡 enable/start——啟用排程這個動作留給
+    # rustfs.sh 自己在呼叫完這支 playbook 之後直接做（見該檔案開頭說明），
+    # 跟 rustfs 容器本身啟不啟動是分開兩件事。這兩個 unit 是 root 層級的
+    # system unit（不是 rootless user unit），因為 mount.cifs 需要真正的
+    # root 權限，rootless 的 rustfs 使用者做不到——這兩個 task 不需要
+    # become/become_user，ansible-navigator 整個 ansible-playbook 行程本來
+    # 就是以 root 身份跑的（見 ansible-navigator.yml 的 --user=0）。
+    #
+    # 排程時間訂在每天 03:30——比 Harbor 自己的每週日 04:00 GC 排程早半小時，
+    # 刻意避開跟它的 I/O 重疊；選每天（不是每週）是因為這裡存的是網站的
+    # 資料庫備份跟目前資料，備份頻率沒有理由比資料本身的變動頻率低太多。
+
+    - name: '裝 systemd **system** unit：rustfs-backup.service（ExecStart 指到裝機前就渲染好的 backup-to-nas.sh，見 custom/preseed_iso/srv/rustfs/cronjob/backup-to-nas.sh.j2 自己的說明）'
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/rustfs-backup.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Back up RustFS data to NAS (CIFS/SMB)
+          After=network-online.target rustfs.service
+
+          [Service]
+          Type=oneshot
+          ExecStart={{ rustfs_home }}/cronjob/backup-to-nas.sh
+
+    - name: '裝 systemd **system** unit：rustfs-backup.timer（每天 03:30，見上面排程時間的說明）'
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/rustfs-backup.timer
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Daily schedule for rustfs-backup.service
+
+          [Timer]
+          OnCalendar=*-*-* 03:30:00
+          Persistent=true
+
+          [Install]
+          WantedBy=timers.target
+
+    - name: 'daemon-reload（讓上面兩個新 unit 檔案生效；不在這裡 enable/start，見上面的說明）'
+      ansible.builtin.command: systemctl daemon-reload
+      changed_when: true
+
+    # ────────────────────────── 收尾 ──────────────────────────
+
+    - name: '印出結果（journalctl -u bootstrap-rustfs 看得到這段）'
+      ansible.builtin.debug:
+        msg:
+          - "RustFS 已就緒：https://rustfs.internal（web 主控台）、https://rustfs-s3.internal（S3 API），兩者都只能從 WireGuard 隧道連"
+          - "root 帳密就是 custom/.env 的 RUSTFS_ACCESS_KEY/RUSTFS_SECRET_KEY"
+          - "資料存在 {{ rustfs_data_dir }}（專用資料碟 {{ vm_rustfs_mount_path }} 底下）"
+
+    - name: '清掉這支 playbook 自己用過的一次性檔案（rustfs_runtime_vars.yml 裡有明文密碼，用完就刪；rustfs-install.yml 自己也是一次性的，裝完就沒用了，跟 harbor-install.yml 同一個理由）'
+      ansible.builtin.file:
+        path: "/srv/ansible/playbook/{{ item }}"
+        state: absent
+      loop:
+        - rustfs_runtime_vars.yml
+        - rustfs-install.yml
+      changed_when: true

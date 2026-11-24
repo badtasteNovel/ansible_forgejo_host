@@ -13,8 +13,9 @@
 #      自己的公鑰/PresharedKey/IP，動態組出 wg0.conf 的 [Peer] 區塊
 #   3. 渲染 preseed.cfg、重新封裝 ISO（跟之前一樣，remaster-iso.sh 完全沒變邏輯）
 #   4. 渲染 .vmx
-#   5. SSH 進 hypervisor：建資料夾、scp 傳 ISO、scp 傳 .vmx、用 vmkfstools 建兩顆虛擬磁碟
-#      （系統碟 + 資料碟，資料碟 preseed 裝機時會自動格式化、掛載到 vm_data_mount_path）
+#   5. SSH 進 hypervisor：建資料夾、scp 傳 ISO、scp 傳 .vmx、用 vmkfstools 建四顆虛擬磁碟
+#      （系統碟 + 資料碟 + Harbor 專屬資料碟 + RustFS 專屬資料碟，後三顆 preseed
+#      裝機時都會自動格式化、掛載到各自的 vm_*_mount_path）
 #
 # 到這裡自動化就結束——VM 的「註冊」（register）跟「開機」刻意留給人工在 Host Client
 # 網頁介面上做，自動化程式碼完全不碰 ESXi 的管理層（inventory）。
@@ -90,6 +91,33 @@
     caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠（單一埠 + hostname 分流，不是一個服務一個埠）——這是給「人/client 端」看的值，從頭到尾沒變過
     caddy_proxy_internal_port: 8443 # Caddy 容器自己實際監聽的埠（>1024），不是 443——rootless 的 caddy-proxy 用 podman -p 發布埠時，實際在主機這邊 bind 的是 podman 自己的 rootlessport 這支 helper，一樣是 unprivileged 身份，bind <1024 的特權埠一樣會被擋。443→8443 的轉換改成在 firewall.sh.j2 用 root 身份的 nat REDIRECT 規則做掉（進到 wg0、目標埠 443 的封包，在 kernel 層直接轉成 8443），不需要放寬 net.ipv4.ip_unprivileged_port_start 這個系統層級設定，安全姿態跟 k3s 的 Traefik 一樣：沒有任何 unprivileged 行程真的去 bind 特權埠。caddy-proxy-install.yml 的 podman -p、firewall.sh.j2 的 ufw allow、harbor-install.yml 渲染 harbor.caddy 用的 site 監聽埠都是這個值，不是 caddy_proxy_https_port
 
+    # RustFS 跟 caddy-proxy 一樣是強制功能（每台 VM 都裝），不是 Harbor 那種
+    # 開機後表單選出來的分支——S3 相容物件儲存，存網站的資料庫備份（含多年
+    # 份的 columnar 備份）、目前網站資料、各種報表、其他服務（例如
+    # forgejo-db）的備份。跟 Harbor 一樣需要自己獨立一顆專用資料碟（見下面
+    # vm_disk_rustfs_gb），但這顆碟存的是這台 VM 唯一的一份長期資料，不是
+    # Harbor 那種隨時能重新 pull 回來的快取，所以另外還有排程備份到 NAS
+    # 的機制（見 custom/preseed_iso/srv/rustfs/cronjob/）。
+    vm_disk_rustfs_gb: 500 # 大小是估的，沒有實際用量資料可以算——使用者描述的用途是「網站資料庫備份（含多年份 columnar 備份）+ 目前網站資料（半年）+ 各種報表 + forgejo-db 等多個服務各自的備份」，給了比 Harbor（150GB，純快取，有明確的 quota 算法）更大的量，但這個數字本身沒有驗證過，之後真的不夠用再調整——thin provisioning，調大不會立刻佔滿實體空間
+    vm_rustfs_mount_path: "/var/lib/rustfs" # 跟 vm_harbor_mount_path 同一個 FHS 慣例理由
+    rustfs_user: rustfs # rootless 專屬系統使用者，跟 harbor_user/caddy_proxy_user 彼此隔離
+    rustfs_home: /srv/rustfs # bundle 目錄（NAS 備份腳本/排程設定放這裡，見 custom/preseed_iso/srv/rustfs/）
+    rustfs_version: "1.0.6" # 查 Docker Hub 當下（撰寫這份檔案時）rustfs/rustfs 最新的穩定版 tag，沒有實機跑過，之後有需要再調整
+    # 跟 harbor_admin_password/harbor_db_password 同一個做法：直接
+    # lookup('env', ...) 讀，不透過 --extra-vars 傳，避免密碼整個攤在
+    # 指令列上。RustFS 是強制功能，這兩個值無條件必填，不像 Harbor 那兩個
+    # 密碼還有「使用者選了才用得到」的但書。
+    rustfs_access_key: "{{ lookup('env', 'RUSTFS_ACCESS_KEY') }}"
+    rustfs_secret_key: "{{ lookup('env', 'RUSTFS_SECRET_KEY') }}"
+
+    # RustFS 排程備份到 NAS 用的連線資訊——跟 hypervisor_* 那組一樣直接從
+    # custom/.env 讀，nas_directory 是 CIFS/SMB 的 share 名稱，不是本機
+    # 路徑（見 backup-to-nas.sh.j2 自己的說明）。
+    nas_ip: "{{ lookup('env', 'NAS_IP') }}"
+    nas_account: "{{ lookup('env', 'NAS_ACCOUNT') }}"
+    nas_password: "{{ lookup('env', 'NAS_PASSWORD') }}"
+    nas_directory: "{{ lookup('env', 'NAS_DIRECTORY') }}"
+
     wireguard_vm_address: "10.105.0.1"
     wireguard_peer_subnet: "10.105.0.0/24" # charlie 的 authorized_keys 用這個限制 from=，只接受從任一合法 WireGuard peer 連進來
     wireguard_listen_port: 51820
@@ -121,6 +149,7 @@
     datastore_system_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}.vmdk"
     datastore_data_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-data.vmdk"
     datastore_harbor_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-harbor.vmdk"
+    datastore_rustfs_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-rustfs.vmdk"
 
     # 沒有 caddy_certs_dir 這個變數——build 時不再生成任何 CA/leaf 憑證。
     # Caddy 用 tls internal，第一次處理每個 site 時才自己現場生成本地 CA、
@@ -278,6 +307,21 @@
         dest: "{{ preseed_srv_output_dir }}/ansible/playbook/harbor_runtime_vars.yml"
         mode: "0600"
 
+    - name: '渲染 rustfs_runtime_vars.yml，放進 ISO 注入資料夾（VM 上那支 rustfs-install.yml playbook 要用的少數幾個值——root 帳密這種機密）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構。RustFS 跟 caddy-proxy 一樣沒有「開機後表單才知道的值」，不需要像 harbor.yml/harbor.caddy 那樣留著 .j2 等 runtime 才渲染'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/ansible/playbook/rustfs_runtime_vars.yml.j2"
+        dest: "{{ preseed_srv_output_dir }}/ansible/playbook/rustfs_runtime_vars.yml"
+        mode: "0600"
+
+    - name: '渲染 RustFS 排程備份到 NAS 用的腳本跟 CIFS credentials 檔案（兩個都是裝機前就全部知道的值，直接渲染成最終版本，不像 harbor.yml 那種要等開機後表單填值——見兩份 .j2 樣板自己的說明）'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/rustfs/cronjob/{{ item.name }}.j2"
+        dest: "{{ preseed_srv_output_dir }}/rustfs/cronjob/{{ item.name }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { name: backup-to-nas.sh, mode: "0700" }
+        - { name: nas-credentials, mode: "0600" }
+
     - name: '清掉 srv/ 底下還留著 .j2 副檔名的原始樣板（上面「把整個 srv/ 資料夾放進 ISO 注入資料夾」那個 task 連這幾支樣板原始檔也一起搬過來了，這裡已經各自渲染出同名、無 .j2 的正式檔案，原始樣板留著沒用、還可能被誤會成還在生效的設定檔）——harbor/harbor.yml.j2、caddy/sites.d/harbor.caddy.j2 這兩個故意不在這份清單裡：它們要留著 .j2，等 harbor-install.yml 在 VM 上才會真正渲染、也才會自己刪掉原始樣板（見該檔案開頭的說明），這裡提早刪掉的話 harbor-install.yml 會直接找不到樣板可以渲染'
       ansible.builtin.file:
         path: "{{ preseed_srv_output_dir }}/{{ item }}"
@@ -285,7 +329,10 @@
       loop:
         - ansible/playbook/caddy_proxy_runtime_vars.yml.j2
         - ansible/playbook/harbor_runtime_vars.yml.j2
+        - ansible/playbook/rustfs_runtime_vars.yml.j2
         - init/firewall.sh.j2
+        - rustfs/cronjob/backup-to-nas.sh.j2
+        - rustfs/cronjob/nas-credentials.j2
 
     - name: "編譯 bootstrap-services（VM 開機後使用者自己手動執行的互動表單，見 custom/scripts/bootstrap-services/main.go 開頭說明；go run 不適用，道理跟 bootstrap-sudo 一樣——這支要跑在 VM 上，VM 不會有 Go 工具鏈）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構"
       ansible.builtin.command:
@@ -385,6 +432,16 @@
           sshpass -e ssh {{ ssh_opts }}
           {{ hypervisor_username }}@{{ hypervisor_hostname }}
           vmkfstools -c {{ vm_disk_harbor_gb }}G -d thin {{ datastore_harbor_vmdk_path }}
+      environment:
+        SSHPASS: "{{ hypervisor_password }}"
+      changed_when: true
+
+    - name: '用 vmkfstools 建立 RustFS 專屬資料碟（無條件建立，跟 Harbor 那顆待遇一樣，見上面 vm_disk_rustfs_gb 的說明）'
+      ansible.builtin.command:
+        cmd: >
+          sshpass -e ssh {{ ssh_opts }}
+          {{ hypervisor_username }}@{{ hypervisor_hostname }}
+          vmkfstools -c {{ vm_disk_rustfs_gb }}G -d thin {{ datastore_rustfs_vmdk_path }}
       environment:
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
