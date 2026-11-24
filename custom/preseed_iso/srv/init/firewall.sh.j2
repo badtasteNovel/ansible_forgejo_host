@@ -79,13 +79,36 @@ ufw allow from {{ lan_subnet }} to any port {{ caddy_proxy_internal_port }} prot
 # 跑完之後呼叫的是 ufw（不是裸的 iptables），ufw 自己的規則來源只認它管理
 # 的這幾個檔案（before.rules/after.rules/user.rules），裸 iptables 下的
 # 規則不會被 ufw 自己的狀態追蹤到，重開機後 ufw 重新套用規則時也不會保留
-# 任何沒寫進這些檔案裡的東西——這裡用 sed 把 *nat 區塊插進 before.rules
-# 最前面（iptables-restore 吃的是多個獨立的 table 區塊，*nat 要放在
-# before.rules 既有的 *filter 區塊之前或之後都可以，只要自己是完整的
-# *nat ... COMMIT 區塊）。這支腳本本身是一次性的（見開頭的說明），不用
-# 擔心重複插入的問題。
+# 任何沒寫進這些檔案裡的東西——*nat 區塊要放在 before.rules 最前面
+# （iptables-restore 吃的是多個獨立的 table 區塊，*nat 放在既有的 *filter
+# 區塊之前或之後都可以，只要自己是完整的 *nat ... COMMIT 區塊）。這支腳本
+# 本身是一次性的（見開頭的說明），正常情況下不會重複執行，但保留下面這個
+# grep 檢查是為了手動重跑測試時不會重複插入。
+#
+# 下面直接對 before.rules 做 grep/cat/mv，沒有先檢查這個檔案存不存在——
+# 不是沒檢查的假設，是查過 ufw 套件自己的 postinst script 確認過的保證：
+# postinst 在 configure 這個階段（也就是 pkgsel/include 裝 ufw 套件的那
+# 一刻，早在這支腳本跑之前）用 ucf 把 /usr/share/ufw/iptables/before.rules
+# 這個套件自帶的範本部署到 /etc/ufw/before.rules，跟有沒有執行過
+# ufw enable、甚至有沒有執行過任何一次 ufw 指令完全無關，純粹是套件安裝
+# 本身的副作用。這個檔案存在是 ufw 套件自己保證的事，不是這個專案的推測。
+#
+# 用 heredoc 組好整段內容、再跟原檔案一起接起來寫回去，不是把多行內容硬塞
+# 進 sed 的單行 1i 插入指令——原來 sed -i '1i...\n...\n...' 這種寫法，內容
+# 跟插入機制混在同一行，任何一個代入值（例如以後 REDIRECT 的目標位址）裡
+# 出現跟 sed 自己的語法衝突的字元，就會讓整條指令解析出乎意料的結果；
+# heredoc 讓內容單純是文字，插入機制只是單純的「接在前面」，兩者互不干擾。
 if ! grep -q '^\*nat$' /etc/ufw/before.rules; then
-  sed -i '1i*nat\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -i wg0 -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}\nCOMMIT\n' /etc/ufw/before.rules
+  nat_block=$(cat <<'EOF'
+*nat
+:PREROUTING ACCEPT [0:0]
+-A PREROUTING -i wg0 -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
+COMMIT
+EOF
+)
+  before_rules_tmp="$(mktemp)"
+  { printf '%s\n' "$nat_block"; cat /etc/ufw/before.rules; } >"$before_rules_tmp"
+  mv "$before_rules_tmp" /etc/ufw/before.rules
 fi
 
 # EE image build（手寫 Containerfile → podman build，見 config.sh 的 ensure_ee_image）

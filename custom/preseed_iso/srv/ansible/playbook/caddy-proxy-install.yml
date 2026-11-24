@@ -184,16 +184,29 @@
     # 開了一個這個專案本來就刻意拿掉的攻擊面，划不來。直接等檔案出現，
     # 檢查的是我們真正在乎的那個事實本身（CA 檔案在磁碟上，system trust
     # 要灌的就是這個檔案），不透過任何中間 API 的自我回報。
+    #
+    # 路徑是 {{ caddy_proxy_data_dir }}/pki/...，不是
+    # {{ caddy_proxy_data_dir }}/caddy/pki/...：Caddyfile 明確寫了
+    # `storage file_system /data`，這行本身就是在指定 storage 的根目錄，
+    # /data 底下不會再多一層 caddy/ 子目錄（那層 caddy/ 目錄其實真的存在，
+    # 但裡面只有 instance.uuid，跟 CA/憑證無關，是另外一件事，不要被
+    # 目錄名字騙了）。原本這裡多寫了一層 /caddy/，實機撞過：wait_for 乖乖
+    # 等了滿 300 秒的 timeout 還是等不到，查 podman logs 發現 Caddy 其實
+    # 早就把 CA 生出來了（log 裡有 "certificate installed properly in
+    # linux trusts"），直接到 VM 上 find /srv/caddy/data 才確認真正落地
+    # 的路徑沒有那層 /caddy/——這不是 timing 問題，是路徑本身寫錯，拉長
+    # timeout 不會讓一個錯的路徑變出檔案來。config.sh 的
+    # LOCAL_HARBOR_CA_PATH 也有同一個錯，一起改。
 
     - name: '等 Caddy 自己生成的本地 CA 出現（tls internal 第一次 provision 時才會寫進 /data，不是裝機時就有的東西）'
       ansible.builtin.wait_for:
-        path: "{{ caddy_proxy_data_dir }}/caddy/pki/authorities/local/root.crt"
+        path: "{{ caddy_proxy_data_dir }}/pki/authorities/local/root.crt"
         state: present
         timeout: 300 # 同上一個 wait_for：檔案一出現就立刻回來，拉長 timeout 不影響正常等待時間，只是把「真的卡住」的判定門檻放寬到 5 分鐘
 
     - name: '把 Caddy 自己生成的本地 CA 灌進系統信任庫（這台機器上的 podman/buildah/curl 要信任自己這個 Caddy 簽出來的憑證——以後這台 VM 當 k3s host 時，本機自己 pull 自己背後的服務也要用到）'
       ansible.builtin.copy:
-        src: "{{ caddy_proxy_data_dir }}/caddy/pki/authorities/local/root.crt"
+        src: "{{ caddy_proxy_data_dir }}/pki/authorities/local/root.crt"
         dest: /usr/local/share/ca-certificates/caddy-proxy-ca.crt
         remote_src: true
         mode: "0644"

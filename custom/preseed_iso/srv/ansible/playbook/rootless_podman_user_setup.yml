@@ -158,7 +158,7 @@
   environment: "{{ rootless_podman_env }}"
   changed_when: false
   register: rootless_podman_check
-  retries: 5
+  retries: 100 # 跟其他幾個 wait_for 一樣拉長：重試這個指令一旦成功就會立刻回來，拉大這個數字不影響正常情況下的等待時間，只是把「真的卡住」的判定門檻放寬（100 次 * delay 3 秒 ≈ 5 分鐘）
   delay: 3
   until: rootless_podman_check.rc == 0
 
