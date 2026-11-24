@@ -33,12 +33,23 @@ import (
 // 選 n（接外部既有的 Harbor）：Enter 之後追問外部 Harbor 的網址 + 登入用的
 // 帳密（robot 或一般帳號都可以），任何一個欄位空白都視為沒填好、整支程式
 // exit 1，不會呼叫 apply.sh。
+//
+// 選 y（本機裝 Harbor）那個分支問完 hostname 之後，還會呼叫
+// dns-apply.sh（跟 services/ 平級，不是 apply.sh 那條鏈的一環，見該腳本
+// 開頭的完整說明）把這個 hostname 對應進 /etc/hosts——這一步同樣不適合
+// 寫進 apply.sh/harbor.sh 那條鏈：這個值只有表單問完這一刻才知道，寫
+// /etc/hosts 本身又是系統層面的操作，不是表單，職責上屬於 shell，所以
+// 由這支程式問完表單之後直接呼叫一支獨立的 shell script 來做，不是在
+// 這裡用 Go 重新實作一次 shell 本來就做得很好的事（跟最前面的說明同一個
+// 理由），也不是塞進 apply.sh 自己的那條安裝鏈裡（那條鏈跟寫 DNS 對應是
+// 兩件獨立的事）。
 
 type answers struct {
 	WireguardVMAddress string `json:"wireguard_vm_address"`
 	InstallHarbor      bool   `json:"install_harbor"`
 	HarborHostname     string `json:"harbor_hostname"`
 	HarborURL          string `json:"harbor_url"`
+	HarborIp           string `json:"harbor_ip"`
 	HarborUsername     string `json:"harbor_username"`
 	HarborPassword     string `json:"harbor_password"`
 }
@@ -60,6 +71,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "錯誤：找不到 %s（應該跟這支程式放在同一個資料夾下的 services/ 子資料夾）：%v\n", applyScript, err)
 		os.Exit(1)
 	}
+	// dns-apply.sh 跟這支程式平級（不在 services/ 底下——那裡是 apply.sh
+	// 自己 orchestrate 的那條鏈，這支完全獨立在那條鏈之外，見該腳本自己
+	// 開頭的說明，為什麼職責要分開）。
+	dnsApplyScript := filepath.Join(filepath.Dir(exe), "dns-apply.sh")
+	if _, err := os.Stat(dnsApplyScript); err != nil {
+		fmt.Fprintf(os.Stderr, "錯誤：找不到 %s（應該跟這支程式放在同一個資料夾下）：%v\n", dnsApplyScript, err)
+		os.Exit(1)
+	}
 
 	ans := answers{}
 
@@ -69,9 +88,6 @@ func main() {
 				Title("這台 VM 自己的 WireGuard 位址").
 				Description("用 sudo wg show 查，輸入範例：10.105.0.0/24").
 				Value(&ans.WireguardVMAddress),
-			huh.NewNote().
-				Title("設定這台 VM 的 Harbor pull-through cache").
-				Description("caddy-proxy 一定會裝；Harbor 是選用的——可以在本機裝一份，也可以接一個已經存在的外部 Harbor。"),
 			huh.NewConfirm().
 				Title("要在本機安裝 Harbor 嗎？").
 				Value(&ans.InstallHarbor),
@@ -114,12 +130,30 @@ func main() {
 			fmt.Fprintln(os.Stderr, "錯誤：沒有填 Harbor 的 hostname，不會做任何變更")
 			os.Exit(1)
 		}
+
+		// 把這個 hostname 對應進 /etc/hosts，指到 VM 自己 wg0 介面目前的
+		// 位址——交給獨立的 dns-apply.sh 做（見該腳本開頭的完整說明：為
+		// 什麼要獨立成一支腳本、為什麼不直接寫在這裡），這支程式這裡只
+		// 負責呼叫它、把表單問到的 hostname 當參數傳過去。這個步驟要排
+		// 在呼叫 apply.sh 之前——apply.sh 的 harbor_finalize 要在 VM 本機
+		// 跑 podman login <hostname>，沒有這筆 /etc/hosts 對應會直接查
+		// DNS 失敗（實機撞過）。
+		dnsApplyCmd := exec.Command(dnsApplyScript, ans.HarborHostname)
+		dnsApplyCmd.Stdout = os.Stderr
+		dnsApplyCmd.Stderr = os.Stderr
+		if err := dnsApplyCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "錯誤：%s 執行失敗，不會做任何變更：%v\n", dnsApplyScript, err)
+			os.Exit(1)
+		}
 	} else {
 		externalForm := huh.NewForm(
 			huh.NewGroup(
 				huh.NewInput().
-					Title("外部 Harbor 的網址（例如 harbor.other-vm.internal:443，不含 https://）").
+					Title("外部 Harbor 伺服器解析的server-name（例如 harbor.internal ）").
 					Value(&ans.HarborURL),
+				huh.NewInput().
+					Title("Harbor 伺服器的ip").
+					Value(&ans.HarborIp),
 				huh.NewInput().
 					Title("登入帳號（一般帳號或 robot 帳號都可以）").
 					Value(&ans.HarborUsername),
@@ -135,6 +169,11 @@ func main() {
 		}
 		if strings.TrimSpace(ans.HarborURL) == "" {
 			fmt.Fprintln(os.Stderr, "錯誤：沒有填外部 Harbor 的網址，不會做任何變更")
+			os.Exit(1)
+		}
+
+		if strings.TrimSpace(ans.HarborIp) == "" {
+			fmt.Fprintln(os.Stderr, "錯誤: harbor server-ip 必填")
 			os.Exit(1)
 		}
 		if strings.TrimSpace(ans.HarborUsername) == "" || strings.TrimSpace(ans.HarborPassword) == "" {
@@ -162,8 +201,12 @@ func main() {
 
 	// 跑完就自刪——這是一次性安裝程式，不是常駐工具，留著只會變成一支隨時
 	// 可以重新觸發 Harbor/caddy-proxy 安裝流程的程式。exe 是最前面已經查過
-	// 的執行檔路徑，不用再查一次。
+	// 的執行檔路徑，不用再查一次。dns-apply.sh 跟 servicesDir 平級，不會被
+	// 上面那行 RemoveAll(servicesDir) 一起清掉，這裡額外刪一次。
 	os.RemoveAll(servicesDir)
+	if err := os.Remove(dnsApplyScript); err != nil {
+		fmt.Fprintf(os.Stderr, "警告：刪除 %s 失敗，手動刪掉比較安全：%v\n", dnsApplyScript, err)
+	}
 	if err := os.Remove(exe); err != nil {
 		fmt.Fprintf(os.Stderr, "警告：自我刪除失敗，手動刪掉 %s 比較安全：%v\n", exe, err)
 	}

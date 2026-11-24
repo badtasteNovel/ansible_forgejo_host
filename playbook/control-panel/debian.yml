@@ -303,6 +303,12 @@
         dest: "{{ preseed_bootstrap_output_dir }}/services/"
         mode: "0700"
 
+    - name: "複製 dns-apply.sh（跟 services/ 平級，不是 apply.sh 那條鏈的一環——bootstrap-services（Go）問完表單之後、呼叫 apply.sh 之前自己直接呼叫的獨立步驟，見該腳本開頭說明）放進 ISO 注入資料夾，直接對齊最終 ~{{ vm_user }}/bootstrap/dns-apply.sh 的位置"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../custom/preseed_iso/bootstrap/dns-apply.sh"
+        dest: "{{ preseed_bootstrap_output_dir }}/dns-apply.sh"
+        mode: "0700"
+
     - name: '渲染 preseed.cfg'
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/template/preseed.cfg.j2"
