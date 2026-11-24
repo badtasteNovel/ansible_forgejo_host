@@ -1,8 +1,0 @@
-# 忽略此資料夾內的所有檔案——這個資料夾永遠不該有真正的憑證/私鑰進版控，
-# 憑證是 playbook/control-panel/debian.yml 裝機前才現場簽出來、寫進
-# custom/generated/preseed/<vm_name>/srv/nginx/certs/ 的執行期產物（不是這裡）。
-# 這份 .gitignore 本身純粹是讓 git 追蹤得到這個空資料夾，好讓
-# 「把整個 srv/ 資料夾複製進 ISO 注入資料夾」那個 task 能順便建出這一層
-# 目錄結構，不用額外開一個 task 專門 mkdir。
-*
-!.gitignore

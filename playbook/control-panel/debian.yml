@@ -75,14 +75,20 @@
     # + harbor_hostname，不是這個值。欄位名稱沿用 meta.json 的 registry.port，
     # 沒有另外改 schema，只是意義從「Harbor 對外埠」變成「Harbor 內部埠」。
     harbor_internal_http_port: "{{ harbor_meta.registry.port }}"
-    harbor_hostname: "harbor.internal" # client 端要連 Harbor 時打的名字（caddy-proxy 後面的 vhost）；故意不帶 vm_name——沒有真正的 DNS，每台 peer 自己在本機 hosts 檔案把這個固定名字指到當下連的那台 VM 的 wireguard_vm_address，同一個名字在不同電腦上可以指向不同機器，不需要靠 vm_name 區分
+    # 沒有 harbor_hostname 這個變數——這個值現在是開機後 bootstrap-services
+    # 表單問出來的（預設值一個合理建議，使用者可以直接改掉），裝機前不知道、
+    # 也不需要知道：harbor.yml/harbor.caddy 這兩個樣板現在都是 runtime 才
+    # 渲染（見 harbor-install.yml），TLS 憑證也是 Caddy 自己用 tls internal
+    # 現場簽發，不需要在 build 時就先決定好這個值。
 
     # caddy-proxy 是跟 WireGuard 同等級的強制功能（每台 VM 都裝）：獨立用 podman
-    # 跑一個 nginx，當整台 VM 對外的唯一入口，TLS 在這裡集中終止，以後每多一個
-    # 服務只是在它後面多加一個 vhost，不用再開新的 ufw 洞。
+    # 跑一個 Caddy，當整台 VM 對外的唯一入口，TLS 在這裡集中終止（tls internal
+    # 全自動簽發/續期，不需要我們自己生成/管理任何憑證或私鑰），以後每多一個
+    # 服務只是在它後面多加一個 site 設定，不用再開新的 ufw 洞。
     caddy_proxy_user: caddy-proxy # rootless 專屬系統使用者，跟 harbor_user 彼此隔離
     caddy_proxy_home: /srv/caddy
-    caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠（單一埠 + hostname 分流，不是一個服務一個埠）
+    caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠（單一埠 + hostname 分流，不是一個服務一個埠）——這是給「人/client 端」看的值，從頭到尾沒變過
+    caddy_proxy_internal_port: 8443 # Caddy 容器自己實際監聽的埠（>1024），不是 443——rootless 的 caddy-proxy 用 podman -p 發布埠時，實際在主機這邊 bind 的是 podman 自己的 rootlessport 這支 helper，一樣是 unprivileged 身份，bind <1024 的特權埠一樣會被擋。443→8443 的轉換改成在 firewall.sh.j2 用 root 身份的 nat REDIRECT 規則做掉（進到 wg0、目標埠 443 的封包，在 kernel 層直接轉成 8443），不需要放寬 net.ipv4.ip_unprivileged_port_start 這個系統層級設定，安全姿態跟 k3s 的 Traefik 一樣：沒有任何 unprivileged 行程真的去 bind 特權埠。caddy-proxy-install.yml 的 podman -p、firewall.sh.j2 的 ufw allow、harbor-install.yml 渲染 harbor.caddy 用的 site 監聽埠都是這個值，不是 caddy_proxy_https_port
 
     wireguard_vm_address: "10.105.0.1"
     wireguard_peer_subnet: "10.105.0.0/24" # charlie 的 authorized_keys 用這個限制 from=，只接受從任一合法 WireGuard peer 連進來
@@ -116,16 +122,10 @@
     datastore_data_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-data.vmdk"
     datastore_harbor_vmdk_path: "{{ datastore_vm_dir }}/{{ vm_name }}-harbor.vmdk"
 
-    # CA/leaf 憑證直接生在 preseed_srv_output_dir/caddy/certs/ 底下——不是另外
-    # 放一個獨立的 custom/generated/ca/ 再複製過去：這個專案每次 build 前都是
-    # 先手動跑 task clean 整個砍掉 custom/generated/ 重來，CA 材料跟 preseed
-    # staging 區的生命週期其實是一樣的（都是「這次 build 全新生出來的東西」），
-    # 分開放只是多一層複製的間接性，沒有實際的好處。CA 私鑰（ca.key）跟兩份
-    # CSR（ca.csr/harbor.csr）生在這裡之後，packaging 前會被專門的清理 task
-    # 刪掉（VM 不需要用到 CA 私鑰簽任何東西，CSR 本身也只是中間產物）；
-    # harbor.key 是 Harbor vhost 自己的 leaf 私鑰，caddy-proxy 要用它終止 TLS，
-    # 這個會留著進 ISO。
-    caddy_certs_dir: "{{ preseed_srv_output_dir }}/caddy/certs"
+    # 沒有 caddy_certs_dir 這個變數——build 時不再生成任何 CA/leaf 憑證。
+    # Caddy 用 tls internal，第一次處理每個 site 時才自己現場生成本地 CA、
+    # 簽發 leaf 憑證，存在它自己掛進去的 /data（見 caddy-proxy-install.yml），
+    # 完全是 runtime 的事，跟這支 build-time playbook 無關。
 
     hypervisor_hostname: "{{ lookup('env', 'HYPERVISOR_HOSTNAME') }}"
     hypervisor_username: "{{ lookup('env', 'HYPERVISOR_USERNAME') }}"
@@ -254,7 +254,7 @@
         GOARCH: amd64
       changed_when: true
 
-    - name: '把 custom/preseed_iso/srv/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 /srv 的結構，一次性全部搬過去，不用每個檔案各寫一個 task（包含 rootless_podman_user_setup.yml——這是 caddy-proxy-install.yml/harbor-install.yml 在 VM 上都要 include 的共用 task fragment，原始檔跟著這整棵 srv/ 樹放在 custom/preseed_iso/srv/ansible/playbook/ 底下，不是放在 custom/scripts/ 裡：custom/scripts/ 只放工作目錄（控制節點）自己會用到的東西，任何裝機過程會被複製進 VM 的檔案都該放進 custom/preseed_iso/）。裡面幾個 .j2 樣板檔案也會原封不動一起被搬過去，之後對應的渲染 task 會在同一個目錄下產生渲染好的同名（無 .j2）檔案，渲染完會有一個專門的清理 task 把這些用不到的 .j2 原始樣板刪掉（見下面「清掉 srv/ 底下還留著 .j2 副檔名的原始樣板」）。srv/caddy/certs/ 底下放了一個 .gitignore（憑證是裝機前才簽出來的執行期產物，不會有真正的靜態來源檔案，這份 .gitignore 本身也特意擋掉這個資料夾被意外塞進真正的憑證/私鑰），純粹是為了讓這個遞迴複製能順便建出這一層目錄，不用再額外開一個 task 專門 mkdir'
+    - name: '把 custom/preseed_iso/srv/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 /srv 的結構，一次性全部搬過去，不用每個檔案各寫一個 task（包含 rootless_podman_user_setup.yml——這是 caddy-proxy-install.yml/harbor-install.yml 在 VM 上都要 include 的共用 task fragment，原始檔跟著這整棵 srv/ 樹放在 custom/preseed_iso/srv/ansible/playbook/ 底下，不是放在 custom/scripts/ 裡：custom/scripts/ 只放工作目錄（控制節點）自己會用到的東西，任何裝機過程會被複製進 VM 的檔案都該放進 custom/preseed_iso/）。裡面幾個 .j2 樣板檔案也會原封不動一起被搬過去，大部分對應的渲染 task 會在同一個目錄下產生渲染好的同名（無 .j2）檔案，渲染完會有一個專門的清理 task 把這些用不到的 .j2 原始樣板刪掉（見下面「清掉 srv/ 底下還留著 .j2 副檔名的原始樣板」）——但 harbor/harbor.yml.j2、caddy/sites.d/harbor.caddy.j2 這兩個故意不在這裡渲染，留著 .j2 原封不動搬進 ISO，等 VM 開機後 harbor-install.yml 執行時才用表單填的 harbor_hostname 現場渲染（見該檔案開頭的說明）。caddy-proxy 本身也不再需要預先建一個 certs/ 目錄——它用 Caddy 的 tls internal，CA/憑證是 runtime 第一次處理 site 時才自己生成，寫進另外掛進去的 /data（見 caddy-proxy-install.yml），不是 build 時就要存在的東西'
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/"
         dest: "{{ preseed_srv_output_dir }}/"
@@ -266,122 +266,24 @@
         dest: "{{ preseed_srv_output_dir }}/init/firewall.sh"
         mode: "0700"
 
-    - name: "caddy-proxy 是強制功能：CA 產生、設定檔渲染、安裝 playbook 複製進 ISO 注入資料夾"
-      block:
-        - name: '產生 caddy-proxy 本地 CA 私鑰（直接生在 caddy_certs_dir 底下，若已存在則不重建）'
-          community.crypto.openssl_privatekey:
-            path: "{{ caddy_certs_dir }}/ca.key"
-            type: RSA
-            size: 4096
-            mode: "0600"
+    - name: '渲染 caddy_proxy_runtime_vars.yml，放進 ISO 注入資料夾（caddy-proxy-install.yml 要用的少數幾個值）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構。caddy-proxy 本身不再需要這裡生成任何 CA/憑證——Caddy 用 tls internal，是 runtime 第一次處理 site 時才自己現場生成本地 CA（見 caddy-proxy-install.yml），跟這支 build-time playbook 完全無關'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/ansible/playbook/caddy_proxy_runtime_vars.yml.j2"
+        dest: "{{ preseed_srv_output_dir }}/ansible/playbook/caddy_proxy_runtime_vars.yml"
+        mode: "0600"
 
-        - name: '產生 caddy-proxy CA 的 CSR（CA:TRUE，自簽用；CSR 只是中間產物，packaging 前會被清掉，不會留在 ISO 裡）'
-          community.crypto.openssl_csr:
-            path: "{{ caddy_certs_dir }}/ca.csr"
-            privatekey_path: "{{ caddy_certs_dir }}/ca.key"
-            common_name: "{{ vm_name }} caddy-proxy Local CA"
-            organization_name: "{{ vm_name }}"
-            basic_constraints:
-              - "CA:TRUE"
-            basic_constraints_critical: true
-            key_usage:
-              - keyCertSign
-              - cRLSign
-            key_usage_critical: true
+    - name: '渲染 harbor_runtime_vars.yml，放進 ISO 注入資料夾（VM 上那支 harbor-install.yml playbook 要用的少數幾個值——admin 密碼、port 這種——不用回頭解析 harbor.yml 才拿得到）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構。harbor.yml/harbor.caddy 這兩個樣板故意不在這裡渲染——harbor_hostname 現在是開機後表單填的值，裝機前渲染不到，這兩個 .j2 原始樣板會原封不動跟著上面「整個 srv/ 資料夾」那個 copy task 一起搬進 ISO，等 harbor-install.yml 在 VM 上執行時才真正渲染（見該檔案開頭的說明）'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/ansible/playbook/harbor_runtime_vars.yml.j2"
+        dest: "{{ preseed_srv_output_dir }}/ansible/playbook/harbor_runtime_vars.yml"
+        mode: "0600"
 
-        - name: '自簽 caddy-proxy CA 憑證（10 年，若已存在則不重建）'
-          community.crypto.x509_certificate:
-            path: "{{ caddy_certs_dir }}/ca.crt"
-            privatekey_path: "{{ caddy_certs_dir }}/ca.key"
-            csr_path: "{{ caddy_certs_dir }}/ca.csr"
-            provider: selfsigned
-            selfsigned_not_after: "+3650d"
-            mode: "0644"
-
-        - name: '渲染 caddy_proxy_runtime_vars.yml，放進 ISO 注入資料夾（caddy-proxy-install.yml 要用的少數幾個值）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構'
-          ansible.builtin.template:
-            src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/ansible/playbook/caddy_proxy_runtime_vars.yml.j2"
-            dest: "{{ preseed_srv_output_dir }}/ansible/playbook/caddy_proxy_runtime_vars.yml"
-            mode: "0600"
-
-    - name: "Harbor 相關檔案一律無條件烘焙進 ISO：leaf 憑證/vhost conf/設定檔產生、渲染、安裝 playbook 複製進 ISO 注入資料夾（裝不裝是 bootstrap-services 開機後才決定的事，不是這裡）"
-      block:
-        - name: '產生 Harbor leaf 私鑰（直接生在 caddy_certs_dir 底下——這兩個檔案最終會進 /srv/caddy/certs/，不是 /srv/harbor/，Harbor 自己不碰 TLS；若已存在則不重建）'
-          community.crypto.openssl_privatekey:
-            path: "{{ caddy_certs_dir }}/harbor.key"
-            type: RSA
-            size: 4096
-            mode: "0640"
-
-        - name: '產生 Harbor leaf 憑證的 CSR（CN/SAN 是 harbor_hostname，不是 IP——caddy-proxy 用 hostname 分流，TLS 驗證看的是這個名字，不是 Harbor 自己的位址；CSR 只是中間產物，packaging 前會被清掉）'
-          community.crypto.openssl_csr:
-            path: "{{ caddy_certs_dir }}/harbor.csr"
-            privatekey_path: "{{ caddy_certs_dir }}/harbor.key"
-            common_name: "{{ harbor_hostname }}"
-            organization_name: "{{ vm_name }}"
-            subject_alt_name:
-              - "DNS:{{ harbor_hostname }}"
-            key_usage:
-              - digitalSignature
-              - keyEncipherment
-            key_usage_critical: true
-            extended_key_usage:
-              - serverAuth
-
-        - name: '用 caddy-proxy CA 簽發 Harbor leaf 憑證（825 天，每次重跑都重簽——跟 lg-laravel 那套的慣例一致：換 leaf 不換 CA）'
-          community.crypto.x509_certificate:
-            path: "{{ caddy_certs_dir }}/harbor.crt"
-            csr_path: "{{ caddy_certs_dir }}/harbor.csr"
-            provider: ownca
-            ownca_path: "{{ caddy_certs_dir }}/ca.crt"
-            ownca_privatekey_path: "{{ caddy_certs_dir }}/ca.key"
-            ownca_not_after: "+825d"
-            mode: "0644"
-
-        - name: '渲染 harbor.caddy（caddy-proxy 後面 Harbor 的 vhost 設定），放進 ISO 注入資料夾——放進 preseed_srv_output_dir/nginx/conf.d/，直接對齊最終 /srv/caddy/sites.d/ 的結構'
-          ansible.builtin.template:
-            src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/caddy/sites.d/harbor.caddy.j2"
-            dest: "{{ preseed_srv_output_dir }}/caddy/sites.d/harbor.caddy"
-            mode: "0644"
-
-        - name: '渲染 harbor.yml，放進 ISO 注入資料夾（跟 wg0.conf/preseed.cfg 同一套做法——密碼/位址這些值裝機前在控制節點就全部知道，不用等 VM 開機後才現場組設定檔）——放進 preseed_srv_output_dir/harbor/，直接對齊最終 /srv/harbor/ 的結構'
-          ansible.builtin.template:
-            src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/harbor/harbor.yml.j2"
-            dest: "{{ preseed_srv_output_dir }}/harbor/harbor.yml"
-            mode: "0640"
-
-        - name: '渲染 harbor_runtime_vars.yml，放進 ISO 注入資料夾（VM 上那支 harbor-install.yml playbook 要用的少數幾個值——admin 密碼、port 這種——不用回頭解析 harbor.yml 才拿得到）——放進 preseed_srv_output_dir/ansible/playbook/，直接對齊最終 /srv/ansible/playbook/ 的結構'
-          ansible.builtin.template:
-            src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/ansible/playbook/harbor_runtime_vars.yml.j2"
-            dest: "{{ preseed_srv_output_dir }}/ansible/playbook/harbor_runtime_vars.yml"
-            mode: "0600"
-
-    - name: '找出 caddy/certs/ 裡面不是正式憑證/私鑰的東西（CA 自己的私鑰、兩份 CSR 中間產物、拿來佔位建目錄用的 .gitignore）——範圍只限定在這個資料夾，不是整個 srv/ 都搜'
-      ansible.builtin.find:
-        paths: "{{ preseed_srv_output_dir }}/caddy/certs"
-        excludes:
-          - ca.crt
-          - harbor.crt
-          - harbor.key
-        hidden: true
-      register: caddy_certs_cruft_files
-
-    - name: '清掉上面找到的這些檔案'
-      ansible.builtin.file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ caddy_certs_cruft_files.files }}"
-      loop_control:
-        label: "{{ item.path }}"
-
-    - name: '清掉 srv/ 底下還留著 .j2 副檔名的原始樣板（上面「把整個 srv/ 資料夾放進 ISO 注入資料夾」那個 task 連這幾支樣板原始檔也一起搬過來了，這裡已經各自渲染出同名、無 .j2 的正式檔案，原始樣板留著沒用、還可能被誤會成真正在用的設定檔）'
+    - name: '清掉 srv/ 底下還留著 .j2 副檔名的原始樣板（上面「把整個 srv/ 資料夾放進 ISO 注入資料夾」那個 task 連這幾支樣板原始檔也一起搬過來了，這裡已經各自渲染出同名、無 .j2 的正式檔案，原始樣板留著沒用、還可能被誤會成還在生效的設定檔）——harbor/harbor.yml.j2、caddy/sites.d/harbor.caddy.j2 這兩個故意不在這份清單裡：它們要留著 .j2，等 harbor-install.yml 在 VM 上才會真正渲染、也才會自己刪掉原始樣板（見該檔案開頭的說明），這裡提早刪掉的話 harbor-install.yml 會直接找不到樣板可以渲染'
       ansible.builtin.file:
         path: "{{ preseed_srv_output_dir }}/{{ item }}"
         state: absent
       loop:
         - ansible/playbook/caddy_proxy_runtime_vars.yml.j2
-        - caddy/sites.d/harbor.caddy.j2
-        - harbor/harbor.yml.j2
         - ansible/playbook/harbor_runtime_vars.yml.j2
         - init/firewall.sh.j2
 
@@ -501,4 +403,4 @@
       ansible.builtin.debug:
         msg:
           - "6. VM 開機、SSH 進去之後，跑 sudo ~/bootstrap/bootstrap-services——互動問要不要在本機裝 Harbor（還是接一個已經存在的外部 Harbor），裝好/接上之後才會接著裝 caddy-proxy（caddy-proxy 本身是強制功能，但要等這支程式把 Harbor 這塊決定完才會真的執行安裝，這樣 caddy-proxy 自己要拉的 image 才吃得到 Harbor 的 pull-through cache）。"
-          - "   選了在本機裝 Harbor 的話，裝好之後走 https://{{ harbor_hostname }}:{{ caddy_proxy_https_port }}（只能從 WireGuard 隧道連），admin 密碼就是 custom/.env 的 HARBOR_ADMIN_PASSWORD；peer 端自己的 hosts 檔案要先加一行：{{ wireguard_vm_address }} {{ harbor_hostname }}。"
+          - "   選了在本機裝 Harbor 的話，表單會問要用哪個 hostname（裝好之後走 https://<這個值>:{{ caddy_proxy_https_port }}，只能從 WireGuard 隧道連，admin 密碼就是 custom/.env 的 HARBOR_ADMIN_PASSWORD）——這個值現在是開機後才決定，裝機前不知道，peer 端自己的 hosts 檔案要先加一行指到 {{ wireguard_vm_address }}，名字填表單當時選的那個。"

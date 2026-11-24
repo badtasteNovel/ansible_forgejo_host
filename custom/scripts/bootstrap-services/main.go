@@ -88,18 +88,15 @@ func main() {
 	}
 
 	if ans.InstallHarbor {
-		// 預設值直接讀 /srv/harbor/harbor.yml 的 hostname 欄位——那份檔案是
-		// control-panel/debian.yml 裝機前就渲染好、隨 ISO 注入的（harbor_hostname
-		// 變數現在固定是 "harbor.internal"，不帶 vm_name——沒有真正的 DNS，
-		// 每台 peer 自己在本機 hosts 檔案把這個名字指到當下連的那台 VM，同一個
-		// 名字在不同電腦上可以指向不同機器），跟 harbor.yml 自己的
-		// hostname/external_url、TLS 憑證的 CN/SAN 用的是同一個值，是唯一真正
-		// 跟實際設定一致的來源。這裡故意不自己寫一個字串常數——雖然現在
-		// harbor_hostname 的值固定、不再因 VM 而異，但直接讀檔案還是比在兩個
-		// 地方各自寫一次同一個字串更不容易再度脫鉤（以後 debian.yml 那邊的
-		// 值要是改了，這裡不用跟著改）。讀檔案失敗（理論上不該發生，這份
-		// 檔案裝機當下就該存在）才退回舊的固定字串，至少讓表單還能動。
-		ans.HarborHostname = readHarborHostnameDefault()
+		// 固定預設值，使用者可以直接接受或改掉——不需要去讀任何檔案當預設值：
+		// harbor.yml/harbor.caddy 這兩個樣板現在是 harbor-install.yml 在
+		// VM 上才渲染的（見該檔案開頭的說明），這支程式問完這個問題之後
+		// 才會去呼叫 apply.sh（進而跑到 harbor-install.yml），問的當下
+		// harbor.yml 根本還不存在，沒有「真實值」可以讀。這裡填的值會透過
+		// --extra-vars 傳進 harbor-install.yml，直接變成 harbor.yml/
+		// harbor.caddy 渲染出來的真正內容，不會有脫鉤的問題——這個值從頭
+		// 到尾只有這裡這一個來源。
+		ans.HarborHostname = "harbor.internal"
 
 		hostnameForm := huh.NewForm(
 			huh.NewGroup(
@@ -170,28 +167,4 @@ func main() {
 	if err := os.Remove(exe); err != nil {
 		fmt.Fprintf(os.Stderr, "警告：自我刪除失敗，手動刪掉 %s 比較安全：%v\n", exe, err)
 	}
-}
-
-// 從 /srv/harbor/harbor.yml 讀 hostname 欄位當表單預設值——這份檔案裝機時
-// 就已經注入好，格式固定是 "hostname: <值>" 單獨一行、沒有引號（見
-// harbor.yml.j2），直接找這一行、取冒號後面的部分即可，不需要真的解析
-// 整份 YAML。讀不到就退回舊的固定字串，讓表單至少還能用。
-func readHarborHostnameDefault() string {
-	const fallback = "harbor.internal"
-	data, err := os.ReadFile("/srv/harbor/harbor.yml")
-	if err != nil {
-		return fallback
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		rest, ok := strings.CutPrefix(line, "hostname:")
-		if !ok {
-			continue
-		}
-		hostname := strings.TrimSpace(rest)
-		if hostname != "" {
-			return hostname
-		}
-	}
-	return fallback
 }

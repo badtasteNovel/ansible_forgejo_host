@@ -8,12 +8,18 @@ set -euo pipefail
 # .sh，這支不重複寫那些邏輯——好處是以後要新增別的服務，一樣是「寫一支
 # 新的 xxx.sh + 在這裡多呼叫一行」，不用動既有服務的程式碼。
 #
-# harbor.sh 是用 source 讀進來、再明確呼叫 harbor_setup 這個函式——不是當
-# 子行程執行。跟 config.sh 的慣例一致：source 只負責載入定義，不會有副
-# 作用，真正執行要靠呼叫端自己叫函式。這支需要 harbor_setup 算出來的
-# harbor_registry 這個值，用函式讓它直接變成這支腳本自己的變數，不需要靠
-# $(...) 接 stdout（那樣 harbor.sh 裡任何一行 echo 忘記送 stderr 都會污染
-# 這個值）。caddy.sh 不需要回傳任何東西，維持子行程執行就好。
+# harbor.sh 是用 source 讀進來、再明確呼叫 harbor_install/harbor_finalize
+# 這兩個函式——不是當子行程執行。跟 config.sh 的慣例一致：source 只負責
+# 載入定義，不會有副作用，真正執行要靠呼叫端自己叫函式。這支需要這兩個
+# 函式算出來的 harbor_registry 這個值，用函式讓它直接變成這支腳本自己的
+# 變數，不需要靠 $(...) 接 stdout（那樣 harbor.sh 裡任何一行 echo 忘記送
+# stderr 都會污染這個值）。caddy.sh 不需要回傳任何東西，維持子行程執行就好。
+#
+# harbor_install 跟 harbor_finalize 中間特意插了 caddy.sh——本機裝 Harbor
+# 時，harbor_install 只負責把 Harbor 本身裝起來、渲染 caddy-proxy 要用的
+# site 設定，實際的 TLS 終止/CA 要等 caddy.sh 把 caddy-proxy 真的啟動
+# 之後才存在，harbor_finalize 的「trust CA + podman login」兩步必須排在
+# caddy-proxy 啟動之後，不然會連不上（實機撞過，見 harbor.sh 自己的說明）。
 #
 # 失敗就直接 exit（set -e 會讓任何一步失敗時整支腳本中止），不會自己清理
 # 任何東西——bootstrap-services（Go）看到這支腳本失敗，不會刪除這組檔案，
@@ -79,9 +85,11 @@ harbor_registry=""
 echo "==> 處理 Harbor（本機安裝或接外部既有的）..."
 # shellcheck source=harbor.sh
 source "$SCRIPT_DIR/harbor.sh"
-harbor_setup
+harbor_install
 
 "$SCRIPT_DIR/caddy.sh"
+
+harbor_finalize
 
 echo ""
 echo "全部裝完了："

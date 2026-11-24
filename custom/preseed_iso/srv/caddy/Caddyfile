@@ -1,0 +1,22 @@
+# 主設定檔，純靜態、沒有任何變數、不用 Jinja 渲染——所以這個檔案沒有
+# .caddy.j2 副檔名，直接整份跟著 srv/ 一起複製進 ISO，裝機時就是最終版本。
+#
+# admin off：關掉 Caddy 自己的 admin API（預設監聽 2019）。這個專案裡
+# 沒有任何東西需要在執行期動態呼叫 admin API 改設定（跟這個專案一路的
+# 「設定檔是渲染出來的靜態產物，不是執行期動態改」風格一致），關掉這個
+# 額外的本機 API 入口，縮小攻擊面。
+#
+# storage file_system /data：明確指定 Caddy 自己的資料目錄（CA 私鑰、
+# 自動簽發的憑證、OCSP staple 都存在這裡）。不寫這行的話，Caddy 預設會
+# 用 XDG 慣例去找（$HOME/.local/share/caddy），這個容器用什麼身份跑、
+# $HOME 解析到哪裡都還沒驗證過——明確寫死掛進來的 /data，不用去猜隱性
+# 預設值算出來的路徑對不對。
+#
+# import sites.d/*.caddy：每個服務各自一個檔案（跟 nginx 的 conf.d 慣例
+# 一樣），以後新增服務直接多放一個 .caddy 檔案，不用動這份主設定檔。
+{
+	admin off
+	storage file_system /data
+}
+
+import sites.d/*.caddy

@@ -6,3 +6,7 @@
 
 # ESXi 連線密碼等機密，只保留 custom/.env.example 當範本
 custom/.env
+
+# go build 編出來的執行檔（跟 main.go 同名、沒有副檔名）——本機建置產物，
+# 不是 source，不該進版控
+custom/scripts/bootstrap-services/bootstrap-services

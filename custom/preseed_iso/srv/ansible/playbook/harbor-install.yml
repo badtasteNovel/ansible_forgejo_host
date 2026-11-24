@@ -8,11 +8,13 @@
 # 邏輯對照 lg-laravel 專案 scripts/tasks/podman-deploy/harbor.yaml 的
 # preflight → cert → install → configure-proxy-cache 這條流程搬過來的，主要差異：
 #   - cert 那步整個拿掉：Harbor 自己完全不碰 TLS，只在 127.0.0.1 上講明文 HTTP
-#     （見下面限制 proxy service port 那段）。TLS 統一由獨立的 nginx 反代
-#     （caddy-proxy，見 custom/preseed_iso/srv/caddy/）集中終止
-#     ——CA/leaf 憑證是控制節點裝機前用 community.crypto 簽好、隨 ISO注入到
-#     caddy-proxy 的暫存資料夾（不是這支 playbook 的暫存資料夾），這支完全不碰
-#     憑證檔案，也不用把 CA 灌進系統信任庫（那是 caddy-proxy-install.yml 的事）。
+#     （見下面限制 proxy service port 那段）。TLS 統一由獨立的反代
+#     （caddy-proxy，見 custom/preseed_iso/srv/caddy/）集中終止，而且是 Caddy
+#     自己用 tls internal 全自動簽發/續期——這支完全不碰任何憑證/私鑰檔案，
+#     也不用把 CA 灌進系統信任庫（那是 caddy-proxy-install.yml 的事）。這支
+#     唯一要做的，是在最前面先把 harbor.yml/harbor.caddy 這兩個樣板渲染出來
+#     （harbor_hostname 現在是表單填的值，裝機前渲染不到，只能等這支執行時
+#     才知道，見下面「渲染 harbor.yml/harbor.caddy」那兩個 task）。
 #   - 密碼不是存 pass（GPG 密碼管理工具，這個專案沒有這套東西）：admin/db 密碼
 #     來自 custom/.env，裝機前就渲染進 harbor_runtime_vars.yml 一起注入；robot
 #     帳號的 secret 是真正的執行期產物，裝好之後存在本機檔案（見最後一個 play）。
@@ -39,7 +41,8 @@
     - /srv/ansible/playbook/harbor_runtime_vars.yml
 
   vars:
-    caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 harbor_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行 URL
+    caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 harbor_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行 URL。這是給 client 端看的值
+    caddy_proxy_internal_port: 8443 # caddy-proxy 容器自己實際監聽的埠，渲染 harbor.caddy 的 site 設定要用這個值，不是 caddy_proxy_https_port——見 caddy-proxy-install.yml/firewall.sh.j2 自己的說明，443→8443 的轉換是 root 身份的 nat REDIRECT 做掉的
     harbor_installer_cache: /var/cache/harbor-installer
     harbor_tgz_name: "harbor-offline-installer-{{ harbor_version }}.tgz"
     harbor_tgz_cached_path: "{{ harbor_installer_cache }}/{{ harbor_tgz_name }}"
@@ -74,20 +77,46 @@
           - "{{ vm_harbor_mount_path }}"
           - "{{ harbor_installer_cache }}"
 
-    # ────────────────────────── 設定檔權限收緊 ──────────────────────────
-    # harbor.yml 已經由控制節點渲染好、隨 ISO 直接注入到 {{ harbor_home }}（不是
-    # 先放另一個暫存資料夾、裝好再搬——goharbor/prepare 這個容器是靠
-    # -v {{ harbor_home }}:/input:z 掛進去讀 harbor.yml 的，見下面「跑
-    # goharbor/prepare」那個 task，檔案本來就要放在 harbor_home 底下才找得到）。
-    # 擁有者已經由上面「建立 harbor 這個 rootless 專屬系統使用者」那步的
-    # recurse: true chown 處理掉了，這裡只需要把這一份的權限收得比同目錄
-    # 其他檔案更嚴格一點——裡面有 harbor_admin_password/database.password
-    # 明文密碼。
+    # ────────────────────────── 渲染 harbor.yml/harbor.caddy ──────────────────────────
+    # 這兩個樣板裝機前故意沒有渲染（還留著 .j2 原始檔跟著整棵 srv/ 樹搬過來，
+    # 見 control-panel/debian.yml 的說明）——harbor_hostname 現在是表單填的
+    # 值，裝機當下不知道，只能等 bootstrap-services 問完、apply.sh 把這個值
+    # 用 --extra-vars 傳進這支 playbook 時才真正渲染。harbor.caddy 直接寫進
+    # caddy-proxy 的 sites.d（路徑是 control-panel/debian.yml 裡 caddy_proxy_home
+    # 寫死的常數組出來的，跟 ansible-navigator.yml 的掛載路徑/caddy-proxy-install.yml
+    # 裡的同名變數一致，這裡直接寫字串、不透過樣板傳——harbor-install.yml 跟
+    # caddy-proxy-install.yml 本來就是兩支獨立執行的 playbook，沒有共用變數的
+    # 機制），caddy-proxy 容器下次（re）start 時就會透過 import 吃到這個新
+    # site；擁有者會在 caddy-proxy-install.yml 自己那步的 recurse: true chown
+    # 處理掉，這裡不用管。
 
-    - name: '收緊 harbor.yml 的權限（裡面有明文密碼，不該跟目錄裡其他檔案一樣寬）'
-      ansible.builtin.file:
-        path: "{{ harbor_home }}/harbor.yml"
+    - name: '渲染 harbor.yml（harbor_hostname 是 apply.sh 用 --extra-vars 傳進來的表單值，裝機前渲染不到；owner/group 明確指定 harbor——這個 task 跑在上面「建立 harbor 使用者」那步的 recurse: true chown 之後，新產生的檔案預設是 root 擁有，不指定的話 harbor 自己之後讀不到）'
+      ansible.builtin.template:
+        src: "{{ harbor_home }}/harbor.yml.j2"
+        dest: "{{ harbor_home }}/harbor.yml"
+        owner: "{{ harbor_user }}"
+        group: "{{ harbor_user }}"
         mode: "0640"
+
+    - name: '刪掉 harbor.yml.j2 原始樣板（渲染完就沒用了，留著容易被誤會成還在生效的設定）'
+      ansible.builtin.file:
+        path: "{{ harbor_home }}/harbor.yml.j2"
+        state: absent
+
+    - name: '渲染 harbor.caddy（caddy-proxy 的 site 設定，同樣要等表單填的 harbor_hostname）'
+      ansible.builtin.template:
+        src: /srv/caddy/sites.d/harbor.caddy.j2
+        dest: /srv/caddy/sites.d/harbor.caddy
+        mode: "0644"
+
+    - name: '刪掉 harbor.caddy.j2 原始樣板（渲染完就沒用了）'
+      ansible.builtin.file:
+        path: /srv/caddy/sites.d/harbor.caddy.j2
+        state: absent
+
+    # harbor.yml 的 owner/group/mode 已經在上面渲染那個 task 裡直接設好了
+    # （裡面有 harbor_admin_password/database.password 明文密碼，所以權限
+    # 從一開始就收緊、不是渲染完再補一個 task 調整），這裡不用再處理一次。
 
     # ────────────────────────── 下載／校驗 offline installer ──────────────────────────
 
@@ -157,6 +186,12 @@
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
+      changed_when: true
+
+    - name: "補 o+x 在 {{ harbor_home }} 底下所有目錄上（不開 r，只開 x——goharbor/prepare 自己產生的 common/config/... 整條路徑預設是 0750 harbor:harbor，只有 harbor 自己能走，但 nginx-photon 這個 service 偏偏是用 image 自己 Dockerfile 指定的非 root UID（10000）在跑，既不是 harbor 本人也不在它的 group 裡——Unix 路徑解析規則是『每一層目錄都要有 x 才能繼續往下走』，缺了任何一層，不管最終那個檔案本身的權限開多寬都進不去。實機撞過：prepare 自己明明已經正確把 nginx.conf 的擁有者設成 nginx 容器內部 UID 對應的身份、檔案 mode 也沒問題，nginx 開機還是直接 'open() \"/etc/nginx/nginx.conf\" failed (13: Permission denied)' crash-loop，根因是 common/config/nginx 這一路上每一層目錄都卡住。這個 task 要排在 prepare 跑完之後——prepare 執行前這些目錄根本還不存在，rootless_podman_user_setup.yml 裡類似的 o+x 補丁只碰得到當時已經存在的最上層，碰不到 prepare 事後才生出來的這幾層。只加 x 不加 r：敏感內容的保護靠檔案自己的 mode（harbor.yml 0640、secrets/ 0700），不靠擋住路徑讓人連經過都不行，這裡放寬不會讓任何內容變得可讀，只是讓路徑本身變得可以被經過）"
+      ansible.builtin.shell: find {{ harbor_home }} -type d -exec chmod o+x {} +
+      args:
+        executable: /bin/bash
       changed_when: true
 
     - name: '移除 prepare 產出 docker-compose.yml 裡的 log service（image 內部用 sudo 切使用者，rootless 下讀不到 /etc/shadow 會 crash-loop；log 改走 journald），並把 proxy service 對外發布的埠限制在 127.0.0.1（Harbor 自己完全不對外，caddy-proxy 用 --network=host 連這個 loopback 埠，外部摸不到）'

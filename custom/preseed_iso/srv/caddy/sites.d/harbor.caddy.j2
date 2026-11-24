@@ -1,31 +1,44 @@
-# Harbor 在獨立 nginx 反代（caddy-proxy）後面的 vhost 設定——TLS 在這裡
-# （caddy-proxy 容器內）終止，Harbor 自己完全不碰 TLS，只在 loopback 上講
-# 明文 HTTP（見 harbor.yml.j2）。裝機前在控制節點渲染好，隨 ISO 注入到
-# caddy-proxy 的 conf.d/，不是 Harbor 自己的檔案——Harbor 完全不知道自己
-# 被掛在哪個 hostname 後面。
+# Harbor 在獨立反代（caddy-proxy）後面的 site 設定——TLS 在這裡（caddy-proxy
+# 容器內）終止，Harbor 自己完全不碰 TLS，只在 loopback 上講明文 HTTP（見
+# harbor.yml.j2）。這份檔案本身是裝機前就跟著 ISO 注入的（.j2 原始樣板，
+# 不是渲染好的版本），真正渲染成這個同名、無 .j2 的檔案是在 VM 開機後、
+# harbor-install.yml 執行時才做的——harbor_hostname 現在是表單填的值，裝機
+# 當下還不知道，等不到 build 時渲染。
 #
-# 路徑是容器內部路徑（/etc/nginx/...），不是 VM 主機上的路徑——caddy-proxy
-# 容器把 {{ caddy_proxy_home }}/certs、{{ caddy_proxy_home }}/conf.d 分別掛到
-# 容器內的 /etc/caddy/certs、/etc/nginx/conf.d（見 caddy-proxy-install.yml
-# 的 systemd unit）。
+# tls internal：Caddy 自己內建的本地 CA，第一次用到就自動生成、之後每次
+# 簽發/續期這個 site 的憑證都靠這張自己的 CA，完全不需要我們自己生成 CA
+# 或 leaf 憑證、也不需要自己處理到期重簽——這是這次決定從 nginx 換成
+# Caddy 最主要的理由。CA 本身存在掛進來的 /data（見 Caddyfile 的
+# storage file_system 設定），容器重啟不會換掉。
 #
-# caddy-proxy 容器跑 --network=host，listen 一定要明確寫 WireGuard 位址——
-# 不寫位址在 host network 下會變成監聽主機所有介面，繞過 sshd 那種「只綁
-# WireGuard 位址」的既有慣例。
-server {
-    listen {{ wireguard_vm_address }}:{{ caddy_proxy_https_port }} ssl;
-    server_name {{ harbor_hostname }};
-
-    ssl_certificate     /etc/caddy/certs/harbor.crt;
-    ssl_certificate_key /etc/caddy/certs/harbor.key;
-
-    client_max_body_size 0; # Harbor 推送大 image layer 不能卡 body size 限制
-
-    location / {
-        proxy_pass http://127.0.0.1:{{ harbor_internal_http_port }};
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
+# site 設定監聽的是 {{ caddy_proxy_internal_port }}，不是 client 端實際連
+# 的 {{ caddy_proxy_https_port }}——caddy-proxy 容器自己只監聽高位埠，443
+# 完全不碰，443→{{ caddy_proxy_internal_port }} 的轉換是裝機時 root 身份
+# 的 firewall.sh.j2 用 nat REDIRECT 規則在 kernel 層做掉的（見那支腳本跟
+# caddy-proxy-install.yml 自己的說明——這是為了繞開這台機器 rootless +
+# --network=host + crun 組合下一個真的卡死的 cgroup2 bug 而改的架構，見
+# caddy-proxy-install.yml 開頭的完整說明）。
+#
+# 沒有 bind 這一行：caddy-proxy 容器現在用 slirp4netns（自己獨立的
+# network namespace），不是 --network=host，容器裡監聽哪個位址已經跟
+# 外部完全無關，外部唯一能連進來的路徑是 caddy-proxy.service 那個 -p
+# {{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }}
+# 明確發布出來的那一個，限制已經在那一層做掉了，這裡不用再管。
+#
+# reverse_proxy 目標是 10.0.2.2，不是 127.0.0.1：10.0.2.2 是 slirp4netns
+# allow_host_loopback=true 這個選項開出來的固定 gateway 位址（slirp4netns
+# 自己的預設值，不是這台 VM 專屬），讓 caddy-proxy 容器能連到主機的
+# loopback——Harbor 自己完全不對外，只在主機的 127.0.0.1 上講明文 HTTP
+# （見 harbor.yml.j2），caddy-proxy 容器自己獨立的 network namespace裡，
+# 127.0.0.1 只會指向它自己，摸不到主機，必須透過這個 gateway 位址才連得
+# 到，已經實機驗證過 curl http://10.0.2.2:{{ harbor_internal_http_port }}/... 真的連得到。
+#
+# reverse_proxy 不需要像 nginx 的 proxy_pass 那樣手動補
+# X-Forwarded-For/X-Forwarded-Proto/X-Forwarded-Host 這些 header——Caddy
+# 預設就會加上去，這點沒有實機驗證過，是對著官方文件寫的。request body
+# 大小 Caddy 預設沒有上限（不像 nginx 預設 1MB 需要特別調大），Harbor
+# 推送大 image layer 不需要額外設定，這個假設也還沒實機驗證過。
+{{ harbor_hostname }}:{{ caddy_proxy_internal_port }} {
+	tls internal
+	reverse_proxy 10.0.2.2:{{ harbor_internal_http_port }}
 }

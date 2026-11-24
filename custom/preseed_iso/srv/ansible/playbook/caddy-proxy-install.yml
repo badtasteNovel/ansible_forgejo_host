@@ -1,43 +1,62 @@
 ---
-# nginx 反代安裝 playbook——跟 Harbor 不一樣，這支是強制功能，不是使用者在
+# Caddy 反代安裝 playbook——跟 Harbor 不一樣，這支是強制功能，不是使用者在
 # bootstrap-services 表單裡自己選的；但「什麼時候裝」現在也統一由
 # bootstrap-services 決定時機（先處理完 Harbor 那塊、registries.conf.d mirror
-# 設好之後才觸發這支，這樣這支自己要 pull 的 nginx image 才吃得到 Harbor 的
+# 設好之後才觸發這支，這樣這支自己要 pull 的 Caddy image 才吃得到 Harbor 的
 # pull-through cache），用 ansible-navigator 執行（見 ansible-navigator.yml/Containerfile），
 # 不是 systemd 在開機時自動觸發，跑在 VM 自己身上（hosts: localhost,
 # connection: local）。
 #
-# 這個 nginx 是整台 VM 對外的唯一入口，TLS 在這裡集中終止，以後每多一個用
-# podman 跑的服務（不只 Harbor），都是在這個 nginx 後面加一個 server block，
+# 這個 Caddy 是整台 VM 對外的唯一入口，TLS 在這裡集中終止，以後每多一個用
+# podman 跑的服務（不只 Harbor），都是在這個 Caddy 後面加一個 site 設定，
 # 不需要各自另外開防火牆洞（ufw 只開這支服務自己的對外埠一次，見
 # srv/init/firewall.sh.j2）。
 #
-# 每個服務要給這個 nginx 代理的東西（憑證、vhost conf），都是控制節點裝機前
-# 就已經簽好/渲染好、隨 ISO 一起直接注入到 {{ caddy_proxy_home }}/{certs,conf.d}/
-# 底下（見 control-panel/debian.yml）——不是先放另一個暫存資料夾、裝好再搬，
-# late_command 就直接放進最終位置，這支只負責「把 nginx 這個容器本身架起來」，
-# 完全不需要知道後面實際代理了哪些服務、也不需要在執行期跟其他服務的安裝
-# playbook 互動（例如 harbor-install.yml 完全不會回頭去改這支 playbook 產生
-# 的任何東西）——Harbor 的 vhost conf/憑證現在無條件烘焙進 ISO，conf.d/certs
-# 底下一定會有 Harbor 那份，以後新增其他服務也是一樣的模式，直接多幾個檔案，
-# 不需要這支自己處理。
+# 原本用 nginx，改成 Caddy 的理由：nginx 需要我們自己生成 CA、簽 leaf 憑證、
+# 處理到期重簽，這些全部要自己維護；Caddy 的 `tls internal`
+# 直接內建一套本地 CA，自動簽發/續期，完全不需要我們自己碰任何私鑰——這也是
+# 為什麼這支 playbook（還有下面的 harbor-install.yml）不再需要
+# community.crypto 這個 collection、不需要處理私鑰檔案的掛載/權限問題。
+#
+# 每個服務要給這個 Caddy 代理的東西，分兩種時機：Harbor 的 site 設定
+# （harbor.caddy）現在是 harbor-install.yml 在 runtime 渲染出來的（見該
+# playbook），不是像 harbor.yml 一樣控制節點裝機前就渲染好——因為
+# harbor_hostname 現在是表單填的值，裝機當下還不知道。這支完全不需要知道
+# 後面實際代理了哪些服務、也不需要在執行期跟其他服務的安裝 playbook
+# 互動（這支只負責「把 Caddy 這個容器本身架起來」）。
 #
 # 全程以 caddy-proxy 這個 rootless 專屬系統使用者的身份跑 podman/systemctl --user
 # （容器逃逸拿不到主機 root，也跟 harbor 使用者彼此隔離），rootless 使用者設置
 # 那段跟 harbor-install.yml 共用同一份 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml。
 #
-# caddy-proxy 容器用 --network=host，不是 -p 單純 port mapping：它要反代的
-# 後端（Harbor 之類）是「另一個 rootless 使用者」自己的 podman-compose 服務，
-# 綁在 VM 主機的 127.0.0.1 上（見 harbor-install.yml 限制 proxy service port
-# 那段）。如果 caddy-proxy 用自己獨立的 network namespace（-p 的預設行為），
-# 它容器內的 127.0.0.1 只會指向自己，完全摸不到主機的 127.0.0.1，等於永遠連
-# 不到任何後端。--network=host 讓 nginx 直接共用 VM 主機的網路堆疊，才能用
-# 127.0.0.1 連到其他 rootless 使用者各自發布在主機 loopback 上的服務——也因為
-# 這樣，nginx 自己的 server block 要明確 listen {{ wireguard_vm_address }}，
-# 不能只寫埠號（host network 下不寫位址會變成監聽主機所有介面，等於繞過
-# sshd 那種「只綁 WireGuard 位址」的既有慣例）。
+# caddy-proxy 容器網路：不是 --network=host。它要反代的後端（Harbor 之類）
+# 是「另一個 rootless 使用者」自己的 podman-compose 服務，綁在 VM 主機的
+# 127.0.0.1 上（見 harbor-install.yml 限制 proxy service port 那段）——這個
+# 專案一開始真的是用 --network=host 解這個問題（跟 Caddy 共用主機的網路
+# 堆疊，才摸得到主機的 127.0.0.1），但實機撞過一個真的卡死的 bug：這台機器
+# 的 crun（1.21）在 rootless + --network=host 的組合下，完全沒辦法幫容器
+# 掛好 /sys/fs/cgroup，無論怎麼調 --cgroupns/--cgroups/--systemd 或換
+# cgroup_manager 都一樣，固定噴 'crun: mount cgroup2 to sys/fs/cgroup: No
+# such file or directory'——拿掉 --network=host、換回預設網路就完全正常，
+# 問題 100% 跟 --network=host 這個選項本身綁在一起，不是設定錯誤。
+#
+# 改用 --network slirp4netns:allow_host_loopback=true：讓 caddy-proxy 保留
+# 自己獨立、rootless 友善的網路 namespace（完全避開上面那個 bug），但
+# slirp4netns 這個選項會額外開一個 gateway 位址（固定是 10.0.2.2，
+# slirp4netns 自己的預設值，不是這台 VM 專屬、也不用另外設定）讓容器內部
+# 連得到主機的 loopback——實機驗證過：容器內 curl
+# http://10.0.2.2:45443/... 真的連得到主機 127.0.0.1:45443 上的 Harbor API。
+# 每個 site 設定的 reverse_proxy 目標要指向這個 10.0.2.2，不是 127.0.0.1
+# （127.0.0.1 在這個獨立 network namespace 裡只會指向 caddy-proxy 容器
+# 自己）。對外監聽改用 -p {{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }}
+# 明確發布（{{ caddy_proxy_internal_port }} 是高位埠，不是 client 端實際連
+# 的 443——443 不碰、也不用放寬任何 sysctl，見下面「特權埠」那段跟
+# firewall.sh.j2 自己的說明），不再靠 --network=host 隱含共用主機介面——
+# 這也讓每個 site 設定不用再寫 bind {{ wireguard_vm_address }}：容器自己
+# 獨立的 network namespace 裡監聽哪個位址完全無關緊要，外部唯一能連進來
+# 的路徑就是這個 -p 明確指定的那一個，限制已經在這一層做掉了。
 
-- name: '在 VM 上把 nginx 反代架起來（podman，rootless，TLS 集中終止）'
+- name: '在 VM 上把 Caddy 反代架起來（podman，rootless，TLS 集中終止，tls internal 自動簽發/續期）'
   hosts: localhost
   connection: local
   gather_facts: false
@@ -46,10 +65,11 @@
     - /srv/ansible/playbook/caddy_proxy_runtime_vars.yml
 
   vars:
-    caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh、harbor-install.yml 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 caddy_proxy_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行訊息
-    caddy_proxy_sites_dir: "{{ caddy_proxy_home }}/conf.d"
-    caddy_proxy_cert_dir: "{{ caddy_proxy_home }}/certs"
-    caddy_proxy_image: "docker.io/library/nginx:stable"
+    caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh、harbor-install.yml 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 caddy_proxy_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行訊息。這是給 client 端看的值，caddy-proxy 容器自己不監聽這個埠
+    caddy_proxy_internal_port: 8443 # caddy-proxy 容器自己實際監聽/發布的埠——見下面「特權埠」那段說明，443→這個值的轉換是 firewall.sh.j2 用 root 身份的 nat REDIRECT 做掉的，跟 caddy_proxy_https_port 一樣是寫死常數，三個地方（debian.yml、這支、firewall.sh.j2）要保持一致，改了要一起改
+    caddy_proxy_sites_dir: "{{ caddy_proxy_home }}/sites.d"
+    caddy_proxy_data_dir: "{{ caddy_proxy_home }}/data" # Caddy 自己的資料目錄（CA 私鑰、自動簽發的憑證、OCSP staple），見 Caddyfile 的 storage file_system 設定——一定要是持久、容器重啟後還在的路徑，不然每次重啟都會生出一張新的 CA，之前信任過的人全部要重新信任一次
+    caddy_proxy_image: "docker.io/library/caddy:2.9" # 沒有實機跑過，版本號先寫一個目前（撰寫這份檔案時）合理的穩定版，之後有需要再調整
 
   tasks:
     # ────────────────────────── rootless 使用者 ──────────────────────────
@@ -62,31 +82,28 @@
         rootless_service_dirs:
           - "{{ caddy_proxy_home }}"
           - "{{ caddy_proxy_sites_dir }}"
-          - "{{ caddy_proxy_cert_dir }}"
+          - "{{ caddy_proxy_data_dir }}"
 
-    # ────────────────────────── 信任庫 ──────────────────────────
-    # 每個服務的 CA/leaf 憑證、vhost conf 已經由控制節點簽好/渲染好、隨 ISO
-    # 直接注入到 {{ caddy_proxy_cert_dir }}/{{ caddy_proxy_sites_dir }}（不是先放
-    # 另一個暫存資料夾、裝好再搬），擁有者/權限也已經由上面「建立 caddy-proxy
-    # 這個 rootless 專屬系統使用者」那步的 recurse: true chown 處理掉了，這裡
-    # 不需要再搬一次。
-
-    - name: '把 CA 灌進系統信任庫（這台機器上的 podman/buildah/curl 要信任自己這個 nginx 簽出來的憑證——以後這台 VM 當 k3s host 時，本機自己 pull 自己背後的服務也要用到）'
-      ansible.builtin.copy:
-        src: "{{ caddy_proxy_cert_dir }}/ca.crt"
-        dest: /usr/local/share/ca-certificates/caddy-proxy-ca.crt
-        remote_src: true
-        mode: "0644"
-      register: ca_trust_copy
-
-    - name: 'update-ca-certificates（只有真的換了 CA 才需要重跑）'
-      ansible.builtin.command: update-ca-certificates
-      when: ca_trust_copy is changed
-      changed_when: true
+    # ────────────────────────── 特權埠 ──────────────────────────
+    # caddy-proxy 容器自己只監聽 {{ caddy_proxy_internal_port }}（高位埠，
+    # podman -p 兩邊都是這個值），完全不碰 443 這個 <1024 的特權埠——不需要
+    # 放寬 net.ipv4.ip_unprivileged_port_start，也不需要給 rootlessport
+    # 任何額外的 capability。443→{{ caddy_proxy_internal_port }} 的轉換是
+    # 開機第一次用 root 身份跑的 srv/init/firewall.sh.j2 裡，用 nat table
+    # 的 REDIRECT 規則在 kernel 層做掉的（細節見那支腳本自己的說明）——這支
+    # playbook 完全不用管特權埠的事，等到這支執行的時候，REDIRECT 規則早就
+    # 在裝機時套用好了。這裡曾經試過直接放寬 net.ipv4.ip_unprivileged_
+    # port_start 這個系統層級的 sysctl 讓 rootlessport 自己 bind 443，可以動，
+    # 但放寬的範圍比真正需要的大（等於讓所有 unprivileged 行程都能 bind
+    # 443 以上的埠），改成現在這個 REDIRECT 做法之後就不需要了。
 
     # ────────────────────────── 起服務 ──────────────────────────
+    # Caddy 自己的 Caddyfile（主設定檔，純靜態、沒有變數）已經跟著整棵 srv/
+    # 樹裝機前就注入到 {{ caddy_proxy_home }}/Caddyfile；每個服務各自的 site
+    # 設定（例如 harbor.caddy）則是分別由各自的安裝 playbook 在 runtime
+    # 渲染進 {{ caddy_proxy_sites_dir }}，這支完全不用知道裡面有什麼。
 
-    - name: 'pull nginx image'
+    - name: 'pull Caddy image'
       ansible.builtin.command: podman pull {{ caddy_proxy_image }}
       become: true
       become_user: "{{ caddy_proxy_user }}"
@@ -109,16 +126,19 @@
         mode: "0644"
         content: |
           [Unit]
-          Description=nginx reverse proxy (rootless podman, TLS termination for every service behind it)
+          Description=Caddy reverse proxy (rootless podman, TLS termination for every service behind it, tls internal auto-issue/renew)
           After=network-online.target
 
           [Service]
           Type=oneshot
           RemainAfterExit=yes
           ExecStartPre=-/usr/bin/podman rm -f caddy-proxy
-          ExecStart=/usr/bin/podman run -d --name caddy-proxy --network=host \
-            -v {{ caddy_proxy_sites_dir }}:/etc/nginx/conf.d:z,ro \
-            -v {{ caddy_proxy_cert_dir }}:/etc/caddy/certs:z,ro \
+          ExecStart=/usr/bin/podman run -d --name caddy-proxy \
+            --network slirp4netns:allow_host_loopback=true \
+            -p {{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
+            -v {{ caddy_proxy_home }}/Caddyfile:/etc/caddy/Caddyfile:z,ro \
+            -v {{ caddy_proxy_sites_dir }}:/etc/caddy/sites.d:z,ro \
+            -v {{ caddy_proxy_data_dir }}:/data:z,rw \
             {{ caddy_proxy_image }}
           ExecStop=/usr/bin/podman stop caddy-proxy
           Restart=on-failure
@@ -137,20 +157,56 @@
         - systemctl --user daemon-reload
         - systemctl --user enable --now caddy-proxy.service
 
-    - name: '確認 caddy-proxy 容器真的跑起來了'
-      ansible.builtin.command: podman ps --filter name=caddy-proxy --filter status=running --format {% raw %}'{{.Names}}'{% endraw %} # {% raw %}...{% endraw %} 包起來，不然 Ansible 自己的 Jinja2 會把 podman 的 Go template 語法一起吃掉
-      become: true
-      become_user: "{{ caddy_proxy_user }}"
-      environment: "{{ rootless_podman_env }}"
-      changed_when: false
-      register: caddy_proxy_running_check
-      retries: 10
-      delay: 3
-      until: caddy_proxy_running_check.stdout | trim == 'caddy-proxy'
+    - name: '確認 caddy-proxy 真的開始服務了（改用 wait_for 直接探真正在意的事：{{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }} 這個 TCP port 有沒有人在聽——不是問 podman 自己說容器是不是 running。原本用 podman ps --filter status=running 配 retries/delay 手動輪詢，在這台機器上實測過會不可靠：become_user 這種單純切身份、沒走過真正 PAM session 的呼叫方式，這個專案已經在別處撞過 podman 子指令本身回報失準的案例（podman info 的那段），這裡大概是同一類問題——retries 10 次撞完都看不到容器，但幾秒後用同一條指令手動重跑、或改用 systemctl --user restart 重跑，容器立刻正常起來，代表問題在「問 podman 這件事」本身不穩，不是容器真的沒起來。wait_for 直接量測外部可觀察到的真實狀態（port 通不通），不透過 podman CLI 的自我回報，也不需要 become/become_user/rootless_podman_env 這一整套——connection: local 搭配 hosts: localhost，這個 TCP 連線本就是從 VM 自己的網路堆疊發出去的，跟真的從外部 curl 這個 port 是完全一樣的檢驗）'
+      ansible.builtin.wait_for:
+        host: "{{ wireguard_vm_address }}"
+        port: "{{ caddy_proxy_internal_port }}"
+        timeout: 300 # wait_for 一旦量到 port 通了就立刻回來，不會真的等滿這個數字——timeout 只是「真的卡住」時的上限，拉長不影響正常情況的等待時間，只是讓偶發的慢啟動有更多餘裕，不會提早被判定失敗
+
+    # ────────────────────────── 信任庫 ──────────────────────────
+    # 這張 CA 是 Caddy 自己第一次處理 tls internal 的 site 時才會現場生成
+    # （寫進上面掛好的 /data），不是我們自己事先簽好、注入進 ISO 的東西，
+    # 容器剛回報「port 通了」的那一刻不保證這張憑證已經寫進磁碟（實機 log
+    # 看到的是 CA 安裝訊息出現在 HTTP listener 綁起來之前，但那只是這一次
+    # 觀察到的順序，不是 Caddy 的正式保證，不能拿來跳過驗證）。
+    #
+    # 原本這裡是手刻的 ansible.builtin.stat + until/retries + delay 迴圈，
+    # 等於自己在 Ansible 裡重新發明「等一個檔案出現」這個邏輯——
+    # ansible.builtin.wait_for 本身就有 path/state: present 這個模式，是
+    # Ansible 內建、專門處理「等檔案出現」的 API，不用自己管 retries/delay/
+    # until 怎麼寫，效果一樣但不是自己手刻的輪詢迴圈。
+    #
+    # 考慮過改用 Caddy 自己的 admin API（例如查 /pki/ca/local）直接問
+    # Caddy「這張 CA 生好了沒」，但這個專案的 Caddyfile 已經明確 admin
+    # off——整個專案的風格是設定檔是裝機/渲染時就定案的靜態產物，執行期
+    # 不會再動態呼叫任何東西去改/查設定，admin API 唯一的用途就是這種
+    # 執行期動態查詢，為了一個健康檢查重新打開它，等於是為了方便檢查又
+    # 開了一個這個專案本來就刻意拿掉的攻擊面，划不來。直接等檔案出現，
+    # 檢查的是我們真正在乎的那個事實本身（CA 檔案在磁碟上，system trust
+    # 要灌的就是這個檔案），不透過任何中間 API 的自我回報。
+
+    - name: '等 Caddy 自己生成的本地 CA 出現（tls internal 第一次 provision 時才會寫進 /data，不是裝機時就有的東西）'
+      ansible.builtin.wait_for:
+        path: "{{ caddy_proxy_data_dir }}/caddy/pki/authorities/local/root.crt"
+        state: present
+        timeout: 300 # 同上一個 wait_for：檔案一出現就立刻回來，拉長 timeout 不影響正常等待時間，只是把「真的卡住」的判定門檻放寬到 5 分鐘
+
+    - name: '把 Caddy 自己生成的本地 CA 灌進系統信任庫（這台機器上的 podman/buildah/curl 要信任自己這個 Caddy 簽出來的憑證——以後這台 VM 當 k3s host 時，本機自己 pull 自己背後的服務也要用到）'
+      ansible.builtin.copy:
+        src: "{{ caddy_proxy_data_dir }}/caddy/pki/authorities/local/root.crt"
+        dest: /usr/local/share/ca-certificates/caddy-proxy-ca.crt
+        remote_src: true
+        mode: "0644"
+      register: ca_trust_copy
+
+    - name: 'update-ca-certificates（只有真的換了 CA 才需要重跑）'
+      ansible.builtin.command: update-ca-certificates
+      when: ca_trust_copy is changed
+      changed_when: true
 
     # ────────────────────────── 收尾 ──────────────────────────
 
-    - name: '數一下目前有幾個 vhost conf（純粹給下面印結果用）'
+    - name: '數一下目前有幾個 site 設定（純粹給下面印結果用）'
       ansible.builtin.find:
         paths: "{{ caddy_proxy_sites_dir }}"
         file_type: file
@@ -159,5 +215,5 @@
     - name: '印出結果（journalctl -u bootstrap-caddy-proxy 看得到這段）'
       ansible.builtin.debug:
         msg:
-          - "nginx 反代已就緒，監聽 {{ wireguard_vm_address }}:{{ caddy_proxy_https_port }}（只能從 WireGuard 隧道連）"
-          - "目前代理的服務數量：{{ caddy_proxy_site_files.files | length }}（每多裝一個服務，這裡會多一個 vhost）"
+          - "Caddy 反代已就緒，監聽 {{ wireguard_vm_address }}:{{ caddy_proxy_https_port }}（只能從 WireGuard 隧道連）"
+          - "目前代理的服務數量：{{ caddy_proxy_site_files.files | length }}（每多裝一個服務，這裡會多一個 site 設定）"

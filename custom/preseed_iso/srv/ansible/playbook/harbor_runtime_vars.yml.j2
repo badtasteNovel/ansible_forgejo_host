@@ -3,10 +3,21 @@
 # 跟 harbor.yml 不一樣：harbor.yml 是 Harbor 自己讀的設定檔；這份是給
 # harbor-install.yml 這支 Ansible playbook自己用的（API 認證密碼、組 URL
 # 要用的 port，還有 ufw 規則要用的來源子網）。
+#
+# 故意沒有 harbor_hostname：這個值是開機後 bootstrap-services 表單才問出來
+# 的，build time（渲染這份檔案的當下）根本不存在這個變數可以讀，在這份
+# 檔案裡引用它只會讓 debian.yml 渲染這個檔案時直接噴 undefined 錯誤（已經
+# 實際撞過——連寫在註解裡的雙大括號語法都會被 Jinja2 當成真正的變數引用去
+# 解析，不是單純的文字，所以這段說明故意不用雙大括號寫法）。真正的值是
+# apply.sh/harbor.sh 用 --extra-vars 帶 harbor_hostname 這個 key 直接傳給
+# harbor-install.yml，不經過這份 vars_files 檔案——harbor-install.yml 裡
+# 用到這個變數的地方（渲染 harbor.yml/harbor.caddy、最後印結果那個 debug
+# task）吃的都是 --extra-vars 傳進來的值。
 harbor_admin_password: "{{ harbor_admin_password }}"
+harbor_db_password: "{{ harbor_db_password }}" # harbor.yml.j2 的 database.password；跟 harbor_admin_password 同一批，從 custom/.env 的 HARBOR_DB_PASSWORD 來，build time 就知道
 harbor_internal_http_port: {{ harbor_internal_http_port }} # Harbor 自己只在 127.0.0.1 上講明文 HTTP 的那個埠，不是對外埠
-harbor_hostname: "{{ harbor_hostname }}" # client 端實際連線用的名字（caddy-proxy 後面的 vhost），不是 Harbor 自己 bind 的位址
 harbor_version: "{{ harbor_version }}"
+harbor_cfg_version: "{{ harbor_cfg_version }}" # harbor.yml.j2 自己的 _version 欄位用的 x.y.0 格式，跟 harbor_version（實際要裝的 release tag）是兩個獨立但有對應關係的值，build time 寫死在 control-panel/debian.yml，不是表單問的
 harbor_user: "{{ harbor_user }}"
 harbor_home: "{{ harbor_home }}"
 vm_harbor_mount_path: "{{ vm_harbor_mount_path }}"

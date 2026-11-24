@@ -136,6 +136,13 @@
     recurse: true
   loop: "{{ rootless_service_dirs }}"
 
+- name: "{{ rootless_user_name }} 服務目錄最上層額外加 o+x（不開讀取，只開「可以經過」——rootless 容器裡常常不是用這個使用者自己的身份跑，而是 image 自己 Dockerfile 指定的某個非 root UID，例如 Harbor 的 nginx-photon 內部是 UID 10000，對應到 host 端是 harbor 的 subuid 映射區段裡的某個號碼，既不是 {{ rootless_user_name }} 本人也不在它的 group 裡；上面那個 task 把最上層目錄設成 0750，這種非 root UID 連第一層都進不去，不管再往下哪一層的檔案/目錄權限開多寬都沒用——Unix 的路徑解析規則是「每一層目錄都要有 x 權限才能繼續往下走」。實機撞過：goharbor/prepare 自己已經把 nginx.conf 正確設成 nginx 容器內部 UID 對應的擁有者、檔案本身的 mode 也沒問題，但 nginx 服務開機時直接 'open() \"/etc/nginx/nginx.conf\" failed (13: Permission denied)' crash-loop，根因不在 nginx.conf 或它的直接上層目錄，是在最上層的 harbor_home/caddy_proxy_home 本身卡住了整條路徑。只加 x、不加 r——敏感檔案本身的內容保護靠檔案自己的 mode（harbor.yml 是 0640、secrets/ 是 0700），不是靠擋住路徑讓人進不去，這裡鬆開 o+x 不會讓內容變得可讀，只是讓『存在哪個路徑』這件事變得可被發現，跟內容洩漏是兩件事）"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "o+x"
+  loop: "{{ rootless_service_dirs }}"
+
 - name: "確保 {{ rootless_user_name }} 的 ~/.config 存在（podman 的 rootless 設定/儲存層設定檔都靠 XDG_CONFIG_HOME 預設值找這個目錄，實機撞過 podman info 直接噴 'stat /home/.../.config: no such file or directory'——create_home: true 只會從 /etc/skel 複製標準骨架檔案，.config 不是標準骨架的一部分，不會自動生出來）"
   ansible.builtin.file:
     path: "/home/{{ rootless_user_name }}/.config"
@@ -154,3 +161,10 @@
   retries: 5
   delay: 3
   until: rootless_podman_check.rc == 0
+
+- name: "重置 {{ rootless_user_name }} 的 rootless podman pause process（上面那個 podman ps 是這個使用者第一次呼叫 podman，這個呼叫本身就會順便建立 podman 的 rootless pause process——這個 process 會一路留著、之後每一次 podman 呼叫都 setns 進它那個 mount namespace，不是每次重新建立；實機撞過：這個第一次建立的 pause process 本身的 mount namespace 裡看不到 /etc/resolv.conf/var/tmp，導致後面任何用到 rootless bridge 網路的 podman run/podman-compose up 一律在 start 階段噴 'rootless netns: mount resolv.conf to \"/etc/resolv.conf\": no such file or directory'——用 strace 追過，問題出在這個 pause process 自己的狀態，不是任何網路/image/DNS 參數/cgroup manager 設定，把這個 process kill 掉、讓 podman system migrate 重新建一個全新的，問題就消失了。podman system migrate 的官方用途正是『清掉舊的 pause process、下次呼叫重新建立』，比自己手動 pkill 可靠，而且不用先知道 pause.pid 在哪個路徑）"
+  ansible.builtin.command: podman system migrate
+  become: true
+  become_user: "{{ rootless_user_name }}"
+  environment: "{{ rootless_podman_env }}"
+  changed_when: true

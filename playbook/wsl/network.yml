@@ -288,36 +288,39 @@
     # 過，不會再用到密碼這條路——細節見 inventory/group_vars/windows.yml
     # 開頭的說明。
     #
-    # retries 刻意拉高（10 次、間隔 2 秒）：第一次連線剛好會踩到「sshd
-    # 服務剛啟用/剛改完防火牆規則，服務還沒完全穩定」這種暫時性問題，比
-    # custom/.env 那種單純網路抖動的情況更容易重試成功，給多一點重試次數。
+    # 原本這裡是下面五個 task 各自 register + until: is succeeded + retries:
+    # 10 + delay: 2，同一段防呆邏輯複製貼上五次——理由都寫著「第一次連線
+    # 剛好會踩到 sshd 服務剛啟用/剛改完防火牆規則，服務還沒完全穩定」，
+    # 這其實是「連線本身」不穩，不是這五個 win_* 操作各自會失敗，用
+    # ansible.builtin.wait_for_connection 在最前面一次性把連線等穩（這是
+    # Ansible 內建、專門處理「等遠端主機真的連得上」的 API，官方自己也是
+    # 拿來接在 win_reboot 之後用的同一個模組），比每個操作各自包一層
+    # retries 更準——等的是真正的病灶（連線還沒穩），不是每個操作各自去
+    # 猜「如果連線不穩，重試應該會過」。連線穩了之後，下面五個操作本身都
+    # 是一般的本機檔案/ACL 操作，沒有理由會因為暫時性問題失敗，不需要再
+    # 各自包一層 retries。timeout 拉長到 5 分鐘：wait_for_connection 只要
+    # 連線一通就會立刻回來，拉長 timeout 不影響正常情況的等待時間，只是
+    # 把「真的連不上」的判定門檻放寬，給 sshd/防火牆規則更多餘裕生效。
+    - name: '等 Windows 那端的 SSH 連線真的穩了（sshd 剛啟用/防火牆規則剛改完，不一定馬上就能連）'
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+
     - name: '確保 C:\ProgramData\ssh 存在'
       ansible.windows.win_file:
         path: C:\ProgramData\ssh
         state: directory
-      register: ensure_ssh_dir
-      until: ensure_ssh_dir is succeeded
-      retries: 10
-      delay: 2
 
     - name: '把公鑰寫進 administrators_authorized_keys（content-based，內容沒變就不會重寫，idempotent）'
       ansible.windows.win_copy:
         content: "{{ (hostvars['localhost'].windows_ssh_public_key_raw.content | b64decode).strip() }}\n"
         dest: C:\ProgramData\ssh\administrators_authorized_keys
-      register: deploy_public_key
-      until: deploy_public_key is succeeded
-      retries: 10
-      delay: 2
 
     - name: '關閉 administrators_authorized_keys 的 ACL 繼承（OpenSSH 嚴格檢查這個檔案的權限，繼承來的權限太寬鬆會被直接拒絕）'
       ansible.windows.win_acl_inheritance:
         path: C:\ProgramData\ssh\administrators_authorized_keys
         state: absent
         reorganize: false
-      register: remove_inheritance
-      until: remove_inheritance is succeeded
-      retries: 10
-      delay: 2
 
     - name: '只給 Administrators 完整權限'
       ansible.windows.win_acl:
@@ -326,10 +329,6 @@
         rights: FullControl
         type: allow
         state: present
-      register: acl_administrators
-      until: acl_administrators is succeeded
-      retries: 10
-      delay: 2
 
     - name: '只給 SYSTEM 完整權限'
       ansible.windows.win_acl:
@@ -338,10 +337,6 @@
         rights: FullControl
         type: allow
         state: present
-      register: acl_system
-      until: acl_system is succeeded
-      retries: 10
-      delay: 2
 
     - name: 'win_ping'
       ansible.windows.win_ping:
