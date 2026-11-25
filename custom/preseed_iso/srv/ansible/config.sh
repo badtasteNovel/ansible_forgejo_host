@@ -1,4 +1,4 @@
-# 共用的環境設定——apply.sh/harbor.sh/caddy.sh/software-install.sh、
+# 共用的環境設定——apply.sh/harbor.sh/caddy.sh、
 # /srv/harbor/rotate/update.sh 這種日常維運腳本都在自己最前面 source 這份，不要
 # 各自宣告一樣的路徑常數。這份檔案本身不是可執行腳本（沒有 shebang、沒有
 # set -e），純粹是 source 進別人 shell 的設定/函式庫，被 source 進來的腳本
@@ -17,10 +17,9 @@ source /srv/ansible/ee.conf
 # 依賴了（見 ensure_ee_image() 的說明），不用再管它的 PATH。
 export PATH="/root/.local/bin:$PATH"
 
-# 確認 ansible-navigator 可用——不負責安裝。這個工具理論上 late_command
-# 裝機當下就該用 pipx 裝好了（見 preseed.cfg.j2），實際裝不裝得成功則是
-# 由 bootstrap_services/software-install.sh 在開機後第一次執行時補一層
-# 保證；這支只檢查，缺了就直接報錯、不嘗試現場補裝。
+# 確認 ansible-navigator 可用——不負責安裝。這個工具無條件在 late_command
+# 裝機當下就用 pipx 裝好了（見 preseed.cfg.j2），沒有另外的開機後補裝步驟；
+# 這支只檢查，缺了就直接報錯、不嘗試現場補裝。
 ensure_navigator_tools() {
   if command -v ansible-navigator >/dev/null 2>&1; then
     return 0

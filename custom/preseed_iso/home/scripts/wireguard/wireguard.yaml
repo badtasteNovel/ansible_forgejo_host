@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+# task wireguard:add/wireguard:remove——跟專案 repo 自己根目錄的
+# Taskfile.yaml 同一個慣例（namespace 檔案），只是這份是裝在 VM 上、
+# 給 charlie 互動操作 /srv/network/{cluster,infrastructure}/ 底下那套
+# add-peer.sh/remove-peer.sh 用的（見那兩支腳本自己的說明）。這兩個
+# task 本身都只是「問清楚要對哪個網段、哪個 peer 做事」，真正的邏輯
+# （產生金鑰、改 .conf、wg syncconf）都在對應的 .sh 裡，這裡不重複寫。
+#
+# 這份檔案跟它要用到的 task/gum 兩個工具，都沒有實機跑過。
+
+tasks:
+  add:
+    desc: "在 wg-cluster 或 wg-infrastructure 新增一個 peer，印出對應的 client 端設定"
+    silent: true
+    deps: [":require-sudo"]
+    cmds:
+      - |
+        set -euo pipefail
+        interface=$(sudo wg show interfaces | gum choose --header "要新增 peer 到哪個網段？")
+        if [ -z "$interface" ]; then
+          echo "錯誤：沒有選擇任何網段" >&2
+          exit 1
+        fi
+        segment="${interface#wg-}"
+        sudo "/srv/network/${segment}/add-peer.sh"
+
+  remove:
+    desc: "從 wg-cluster 或 wg-infrastructure 移除一個 peer（要移除哪一個由 remove-peer.sh 自己互動問，這裡只負責選網段）"
+    silent: true
+    deps: [":require-sudo"]
+    cmds:
+      - |
+        set -euo pipefail
+        interface=$(sudo wg show interfaces | gum choose --header "要從哪個網段移除 peer？")
+        if [ -z "$interface" ]; then
+          echo "錯誤：沒有選擇任何網段" >&2
+          exit 1
+        fi
+        segment="${interface#wg-}"
+        sudo "/srv/network/${segment}/remove-peer.sh"

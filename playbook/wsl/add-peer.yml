@@ -71,8 +71,8 @@
     keys_dir: "{{ playbook_dir }}/../../custom/generated/keys"
     wireguard_keys_base_dir: "{{ keys_dir }}/wireguard-keys" # custom/generated/keys/ 底下按用途分的子資料夾之一
     wireguard_peers_dir: "{{ wireguard_keys_base_dir }}/wireguard_peers"
-    wireguard_vm_address: "10.105.0.1"
-    wireguard_listen_port: 51820
+    wireguard_cluster_vm_address: "10.105.0.1"
+    wireguard_cluster_listen_port: 51820
     ssh_host_key_path: "{{ keys_dir }}/known-hosts/{{ vm_name }}/ed_25519" # control-panel/debian.yml 產生的 VM host key，路徑要跟那邊一致
     known_hosts_path: "{{ keys_dir }}/known-hosts/known_hosts" # 這支 playbook 自己組、自己寫——SSH client 端的設定歸這裡管，不歸 control-panel 管
 
@@ -81,8 +81,8 @@
       ansible.builtin.set_fact:
         vm_user: "{{ vm_user }}"
         vm_ssh_port: "{{ vm_ssh_port }}"
-        wireguard_vm_address: "{{ wireguard_vm_address }}"
-        wireguard_listen_port: "{{ wireguard_listen_port }}"
+        wireguard_cluster_vm_address: "{{ wireguard_cluster_vm_address }}"
+        wireguard_cluster_listen_port: "{{ wireguard_cluster_listen_port }}"
         wireguard_peers_dir: "{{ wireguard_peers_dir }}"
         keys_dir: "{{ keys_dir }}"
 
@@ -97,17 +97,17 @@
 
     - name: '確認 VM 自己的 WireGuard 金鑰已經存在（VM 的身分只歸 control-panel/debian.yml 管，這裡不幫忙產生）'
       ansible.builtin.stat:
-        path: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard.pub"
+        path: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard_cluster.pub"
       register: wireguard_vm_pubkey_stat
 
     - name: '擋下「VM 金鑰還不存在」的情況'
       ansible.builtin.assert:
         that: wireguard_vm_pubkey_stat.stat.exists
-        fail_msg: "找不到 {{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard.pub，請先跑過一次 task build:debian（或 ansible-playbook playbook/control-panel/debian.yml）"
+        fail_msg: "找不到 {{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard_cluster.pub，請先跑過一次 task build:debian（或 ansible-playbook playbook/control-panel/debian.yml）"
 
     - name: '讀取 VM 的 WireGuard 公鑰'
       ansible.builtin.slurp:
-        src: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard.pub"
+        src: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard_cluster.pub"
       register: wireguard_vm_public_key_raw
 
     # ---------- WSL2 自己這一邊 ----------
@@ -168,7 +168,7 @@
 
     - name: '送一個封包主動觸發 handshake（wg-quick up 剛建好介面時不會主動送封包，要等 wg0.conf.j2 裡 PersistentKeepalive 的間隔時間到了才會送出第一次——這裡故意送一個 ping 讓它立刻動起來，ping 本身成不成功不重要，重點只是讓 wg0 有封包要送，才會觸發 WireGuard 協定層的 handshake）'
       become: true
-      ansible.builtin.command: "ping -c 1 -W 2 {{ wireguard_vm_address }}"
+      ansible.builtin.command: "ping -c 1 -W 2 {{ wireguard_cluster_vm_address }}"
       changed_when: false
       failed_when: false
 
@@ -187,7 +187,7 @@
     - name: '擋下「重試完還是沒有 handshake」的情況——這種狀況下不應該把這個 peer 標記成已認領'
       ansible.builtin.assert:
         that: (wg_handshake_check.stdout | trim | int) > 0
-        fail_msg: "重試 10 次（每次間隔 3 秒，共約 30 秒）後，wg0 仍然沒有跟 VM 的 WireGuard 發生過 handshake，隧道可能沒有真的接通。請確認：VM 已經開機、VM 上的 wg-quick@wg0 已經啟動、{{ vm_endpoint_ip }} 這個 IP 填對、本機防火牆沒有擋 UDP {{ wireguard_listen_port }}。這個 peer 位置（{{ wsl_peer_name }}）不會被標記成已認領，排查完可以直接重跑 task add-peer。"
+        fail_msg: "重試 10 次（每次間隔 3 秒，共約 30 秒）後，wg0 仍然沒有跟 VM 的 WireGuard 發生過 handshake，隧道可能沒有真的接通。請確認：VM 已經開機、VM 上的 wg-cluster.service 已經啟動、{{ vm_endpoint_ip }} 這個 IP 填對、本機防火牆沒有擋 UDP {{ wireguard_cluster_listen_port }}。這個 peer 位置（{{ wsl_peer_name }}）不會被標記成已認領，排查完可以直接重跑 task add-peer。"
 
     - name: "隧道確定接通成功（真的發生過 handshake），才正式把 {{ wsl_peer_name }} 標記成已認領（見 claim_peer.yml 開頭說明：挑到跟標記分開兩步，避免中途失敗卻已經把這個 peer 用掉）"
       ansible.builtin.include_tasks:
@@ -210,9 +210,9 @@
         src: "{{ ssh_host_key_path }}.pub"
       register: vm_ssh_host_pubkey_raw
 
-    - name: "組出 known_hosts（連線位址固定是 WireGuard 的 {{ wireguard_vm_address }}，不是 DHCP 配的 LAN IP，所以這裡就能直接寫好）"
+    - name: "組出 known_hosts（連線位址固定是 WireGuard 的 {{ wireguard_cluster_vm_address }}，不是 DHCP 配的 LAN IP，所以這裡就能直接寫好）"
       ansible.builtin.copy:
-        content: "[{{ wireguard_vm_address }}]:{{ vm_ssh_port }} {{ (vm_ssh_host_pubkey_raw.content | b64decode).strip() }}\n"
+        content: "[{{ wireguard_cluster_vm_address }}]:{{ vm_ssh_port }} {{ (vm_ssh_host_pubkey_raw.content | b64decode).strip() }}\n"
         dest: "{{ known_hosts_path }}"
         mode: "0600"
 
@@ -253,7 +253,7 @@
       ansible.builtin.debug:
         msg:
           - "WSL2 自己認領到的 peer 是 {{ wsl_peer_name }}，WireGuard 隧道已經接通。"
-          - "之後 SSH 到 VM 要改連 {{ wireguard_vm_address }}，不是它的 LAN IP——VM 的 sshd 已經只監聽 WireGuard 這個位址。"
+          - "之後 SSH 到 VM 要改連 {{ wireguard_cluster_vm_address }}，不是它的 LAN IP——VM 的 sshd 已經只監聽 WireGuard 這個位址。"
 
 - name: '把原生 Windows 加進 VM 的 WireGuard 點對點網路（走 SSH，不用 /mnt/c/... 掛載路徑）'
   hosts: windows
@@ -262,8 +262,8 @@
   vars:
     vm_user: "{{ hostvars['localhost'].vm_user }}"
     vm_ssh_port: "{{ hostvars['localhost'].vm_ssh_port }}"
-    wireguard_vm_address: "{{ hostvars['localhost'].wireguard_vm_address }}"
-    wireguard_listen_port: "{{ hostvars['localhost'].wireguard_listen_port }}"
+    wireguard_cluster_vm_address: "{{ hostvars['localhost'].wireguard_cluster_vm_address }}"
+    wireguard_cluster_listen_port: "{{ hostvars['localhost'].wireguard_cluster_listen_port }}"
     wireguard_peers_dir: "{{ hostvars['localhost'].wireguard_peers_dir }}" # mark_peer_claimed.yml（delegate_to: localhost 那個 include）直接讀這個裸變數名，不是透過 hostvars，所以要在這個 play 自己的 vars 裡也放一份
     keys_dir: "{{ hostvars['localhost'].keys_dir }}"
 
@@ -343,8 +343,8 @@
         - name: '把 VM 的 host key fingerprint 加進/更新 Windows 原生環境真正的 known_hosts（不是複製一份獨立檔案，是直接處理這一行；用 regexp 比對同一個 [IP]:port 開頭的舊行、整行換掉，不是單純比對整行文字完全一樣——VM 重新 build 會換一把新的 host key，沒有 regexp 的話 win_lineinfile 只能判斷「這行文字存不存在」，舊行文字跟新行不一樣，只會一直往後 append、不會清掉舊行，同一個 host 會累積出好幾把不同的 fingerprint，之後 ssh 連線會被「REMOTE HOST IDENTIFICATION HAS CHANGED」卡住，也不會動到裡面其他主機原本的紀錄）'
           community.windows.win_lineinfile:
             path: "{{ windows_home_path }}\\.ssh\\known_hosts"
-            regexp: '^\[{{ wireguard_vm_address | regex_escape }}\]:{{ vm_ssh_port }} '
-            line: "[{{ wireguard_vm_address }}]:{{ vm_ssh_port }} {{ (hostvars['localhost'].vm_ssh_host_pubkey_raw.content | b64decode).strip() }}"
+            regexp: '^\[{{ wireguard_cluster_vm_address | regex_escape }}\]:{{ vm_ssh_port }} '
+            line: "[{{ wireguard_cluster_vm_address }}]:{{ vm_ssh_port }} {{ (hostvars['localhost'].vm_ssh_host_pubkey_raw.content | b64decode).strip() }}"
             create: true
 
         - name: '印出 Windows 那邊還要做的事'

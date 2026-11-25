@@ -100,16 +100,61 @@ d-i grub-installer/bootdev string default
 ### Finishing installation
 d-i finish-install/reboot_in_progress note
 
+### late_command 裡會寫一個 {{ vm_user }} 自己的 systemd --user unit
+### （software-install.service，裝 task/gum 到 ~/.local/bin，見
+### custom/preseed_iso/home/scripts/software-install.sh 自己的說明，為什麼
+### 這支要刻意不用 root）跟 loginctl enable-linger {{ vm_user }} 的效果——
+### 故意不呼叫 `loginctl enable-linger` 這個指令本身，是直接手動建立它
+### 底層真正會寫的那個檔案（/var/lib/systemd/linger/<user>，一個空檔案，
+### 檔案存在就代表這個使用者要 lingering，這是 systemd-logind 自己文件
+### 記載的機制，不是猜的）：loginctl 本身是透過 D-Bus 跟 systemd-logind
+### 講話的，late_command 執行的這個 d-i 安裝環境的 chroot 裡沒有真正在跑
+### 的 systemd-logind 可以讓它連，直接呼叫會卡住或失敗——跟這個專案已經
+### 在 ufw 身上撞過的「late_command 的 in-target 呼叫在 d-i chroot 裡對
+### 真正需要活的系統服務的操作會悄悄失效」是同一類問題，這裡直接繞開
+### 需要活的 D-Bus/systemd-logind 連線這一步，用寫檔案代替呼叫指令。
+### software-install.service 本身也不用 `systemctl --user enable` 開
+### 它——同一個理由，改成手動建 default.target.wants/ 底下的符號連結，
+### 跟 `systemctl --user enable` 實際上會做的事一樣，不需要真的呼叫
+### 這個指令本身。
+###
+### wg-cluster.conf／wg-infrastructure.conf 的「真正」檔案留在
+### /etc/wireguard/<segment>/（wg-quick/systemd unit 認的就是這個路徑，
+### 不能搬走），但在 /srv/network/<segment>/wg-*.conf 這裡額外建一個
+### symbolic link 指過去——/srv/network/<segment>/ 底下的 show.sh/
+### add-peer.sh/remove-peer.sh 都靠這個連結用自己所在目錄的相對路徑讀寫
+### 這份 .conf，不用各自硬寫一次 /etc/wireguard 的路徑，整個網段相關的
+### 「設定＋操作腳本」看起來像是同一個目錄下的東西。私鑰（.key）故意不
+### 做這層連結，show.sh 本來就是直接指定 /etc/wireguard/<segment>/
+### wg-*.key 的絕對路徑去讀。這個連結要排在 /target/srv 整個複製進去
+### 之後才能建（符號連結本身不要求目標已經存在，但連結要放的那個目錄
+### /target/srv/network/<segment>/ 得先存在）。
 d-i preseed/late_command string \
   in-target pipx install ansible-navigator; \
   mkdir -p /target/home/{{ vm_user }}/.ssh; \
-  echo 'from="{{ wireguard_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
+  echo 'from="{{ wireguard_cluster_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   cp -r /cdrom/bootstrap /target/home/{{ vm_user }}/bootstrap; \
   chmod -R 700 /target/home/{{ vm_user }}/bootstrap; \
   chmod 700 /target/home/{{ vm_user }}/.ssh; \
   chmod 600 /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/.ssh; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/bootstrap; \
+  cp -r /cdrom/home/scripts /target/home/{{ vm_user }}/scripts; \
+  chmod -R 700 /target/home/{{ vm_user }}/scripts; \
+  in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/scripts; \
+  mkdir -p /target/home/{{ vm_user }}/.config/systemd/user/default.target.wants; \
+  echo '[Unit]' > /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
+  echo 'Description=Install task/gum into ~/.local/bin for {{ vm_user }} (non-root)' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
+  echo '[Service]' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
+  echo 'Type=oneshot' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
+  echo 'RemainAfterExit=yes' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
+  echo 'ExecStart=/home/{{ vm_user }}/scripts/software-install.sh' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
+  echo '[Install]' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
+  echo 'WantedBy=default.target' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
+  ln -s ../software-install.service /target/home/{{ vm_user }}/.config/systemd/user/default.target.wants/software-install.service; \
+  in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/.config; \
+  mkdir -p /target/var/lib/systemd/linger; \
+  touch /target/var/lib/systemd/linger/{{ vm_user }}; \
   sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config; \
   sed -i '/^Port /d' /target/etc/ssh/sshd_config; \
   echo 'Port {{ ssh_port }}' >> /target/etc/ssh/sshd_config; \
@@ -123,27 +168,57 @@ d-i preseed/late_command string \
   chmod 644 /target/etc/ssh/ssh_host_ed25519_key.pub; \
   chown root:root /target/etc/ssh/ssh_host_ed25519_key /target/etc/ssh/ssh_host_ed25519_key.pub; \
   mkdir -p /target/etc/wireguard; \
-  cp /cdrom/wg0.conf /target/etc/wireguard/wg0.conf; \
-  chmod 600 /target/etc/wireguard/wg0.conf; \
-  chown root:root /target/etc/wireguard/wg0.conf; \
-  in-target systemctl enable wg-quick@wg0; \
+  cp -r /cdrom/wireguard/cluster /target/etc/wireguard/cluster; \
+{% if is_infrastructure_host %}
+  cp -r /cdrom/wireguard/infrastructure /target/etc/wireguard/infrastructure; \
+{% endif %}
+  chmod -R 700 /target/etc/wireguard; \
+  chown -R root:root /target/etc/wireguard; \
+  echo '[Unit]' > /target/etc/systemd/system/wg-cluster.service; \
+  echo 'Description=WireGuard (cluster, 10.105.0.0/24 -- management access + future k3s cluster traffic)' >> /target/etc/systemd/system/wg-cluster.service; \
+  echo 'After=network.target' >> /target/etc/systemd/system/wg-cluster.service; \
+  echo '[Service]' >> /target/etc/systemd/system/wg-cluster.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/wg-cluster.service; \
+  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/wg-cluster.service; \
+  echo 'ExecStart=/usr/bin/wg-quick up /etc/wireguard/cluster/wg-cluster.conf' >> /target/etc/systemd/system/wg-cluster.service; \
+  echo 'ExecStop=/usr/bin/wg-quick down /etc/wireguard/cluster/wg-cluster.conf' >> /target/etc/systemd/system/wg-cluster.service; \
+  echo '[Install]' >> /target/etc/systemd/system/wg-cluster.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/wg-cluster.service; \
+  in-target systemctl enable wg-cluster.service; \
+{% if is_infrastructure_host %}
+  echo '[Unit]' > /target/etc/systemd/system/wg-infrastructure.service; \
+  echo 'Description=WireGuard (infrastructure, 10.104.0.0/24 -- shared infra reachable across multiple clusters, e.g. Harbor)' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  echo 'After=network.target' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  echo '[Service]' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  echo 'ExecStart=/usr/bin/wg-quick up /etc/wireguard/infrastructure/wg-infrastructure.conf' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  echo 'ExecStop=/usr/bin/wg-quick down /etc/wireguard/infrastructure/wg-infrastructure.conf' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  echo '[Install]' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/wg-infrastructure.service; \
+  in-target systemctl enable wg-infrastructure.service; \
+{% endif %}
   sed -i '/^ListenAddress /d' /target/etc/ssh/sshd_config; \
-  echo 'ListenAddress {{ wireguard_vm_address }}' >> /target/etc/ssh/sshd_config; \
+  echo 'ListenAddress {{ wireguard_cluster_vm_address }}' >> /target/etc/ssh/sshd_config; \
   mkdir -p /target/etc/systemd/system/ssh.service.d; \
   echo '[Unit]' > /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
-  echo 'After=wg-quick@wg0.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
-  echo 'Requires=wg-quick@wg0.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
+  echo 'After=wg-cluster.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
+  echo 'Requires=wg-cluster.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
   echo 'fs.inotify.max_user_watches = 1048576' > /target/etc/sysctl.d/99-inotify.conf; \
   echo 'fs.inotify.max_user_instances = 8192' >> /target/etc/sysctl.d/99-inotify.conf; \
   sed -i '/^\(pool\|server\|makestep\) /s/^/# /' /target/etc/chrony/chrony.conf; \
   echo 'server time.stdtime.gov.tw iburst' >> /target/etc/chrony/chrony.conf; \
   echo 'pool pool.ntp.org iburst' >> /target/etc/chrony/chrony.conf; \
-  echo 'allow {{ wireguard_peer_subnet }}' >> /target/etc/chrony/chrony.conf; \
+  echo 'allow {{ wireguard_cluster_peer_subnet }}' >> /target/etc/chrony/chrony.conf; \
   echo 'makestep 1 -1' >> /target/etc/chrony/chrony.conf; \
   in-target systemctl disable systemd-timesyncd; \
   in-target systemctl enable chrony; \
   cp -r /cdrom/srv/. /target/srv/; \
   chmod -R 700 /target/srv; \
+  ln -s /etc/wireguard/cluster/wg-cluster.conf /target/srv/network/cluster/wg-cluster.conf; \
+{% if is_infrastructure_host %}
+  ln -s /etc/wireguard/infrastructure/wg-infrastructure.conf /target/srv/network/infrastructure/wg-infrastructure.conf; \
+{% endif %}
   echo '[Unit]' > /target/etc/systemd/system/podman-network.service; \
   echo 'ConditionPathExists=/srv/init/podman-network.sh' >> /target/etc/systemd/system/podman-network.service; \
   echo 'After=network.target' >> /target/etc/systemd/system/podman-network.service; \

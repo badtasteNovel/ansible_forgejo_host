@@ -21,9 +21,12 @@
 #
 # 沒有 bind 這一行：caddy-proxy 容器現在用 slirp4netns（自己獨立的
 # network namespace），不是 --network=host，容器裡監聽哪個位址已經跟
-# 外部完全無關，外部唯一能連進來的路徑是 caddy-proxy.service 那個 -p
-# {{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }}
-# 明確發布出來的那一個，限制已經在那一層做掉了，這裡不用再管。
+# 外部完全無關，外部唯一能連進來的路徑是 caddy-proxy.service 那兩個
+# -p（cluster 跟 infrastructure 兩個 WireGuard interface 各一個，見
+# caddy-proxy-install.yml 自己的說明）明確發布出來的那兩個，限制已經在
+# 那一層做掉了，這裡不用再管——Harbor 現在兩條路徑都能連得到（caddy-proxy
+# 只看 Host header 決定路由到哪個 site，不管封包是從哪個 interface 進來
+# 的），不是只能走其中一條。
 #
 # reverse_proxy 目標是 10.0.2.2，不是 127.0.0.1：10.0.2.2 是 slirp4netns
 # allow_host_loopback=true 這個選項開出來的固定 gateway 位址（slirp4netns

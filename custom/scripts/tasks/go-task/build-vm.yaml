@@ -45,6 +45,7 @@ tasks:
           echo "錯誤：VM 名稱不能是空的" >&2
           exit 1
         fi
+        is_infrastructure_host=$(jq -r '.is_infrastructure_host' <<<"$vm_form_result")
         preseed_iso_path="$(pwd)/custom/generated/iso/${vm_name}/${vm_name}-preseed.iso"
 
         # Harbor 的 admin/db 密碼是使用者自己在 .env 裡決定的值（不是自動產生的
@@ -113,7 +114,8 @@ tasks:
         ansible-playbook "$build_path" \
           --extra-vars "iso_path=${iso_path}" \
           --extra-vars "peer_slot_count=${peer_slot_count}" \
-          --extra-vars "vm_name=${vm_name}"
+          --extra-vars "vm_name=${vm_name}" \
+          --extra-vars "is_infrastructure_host=${is_infrastructure_host}"
 
         echo "" >&2
         echo "VM 開機、SSH 進去之後，跑 sudo ~/bootstrap/bootstrap-services——互動決定要不要在本機裝 Harbor（還是接一個已經存在的外部 Harbor），裝好/接上之後才會接著裝 nginx-proxy。" >&2

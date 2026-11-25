@@ -35,10 +35,18 @@ fi
 #     鎖定是同一個不變量，ufw 只是再加一層；
 # (3) chrony 的 123/udp——同樣只准 WireGuard peer 子網；
 # (4) caddy-proxy 的對外埠——整台 VM 唯一的 HTTP(S) 入口，不管後面實際代理
-#     了哪些服務（Harbor 或以後加的任何東西），只需要開這一個洞，新增服務
-#     不用回來改這支腳本。來源刻意放行兩個網段，不是只有 WireGuard 子網：
-#     - {{ wireguard_peer_subnet }}：已經加入 WireGuard 的 peer（目前只有
-#       「agent」角色能加入 control-panel，見專案說明）。
+#     了哪些服務（Harbor、RustFS 或以後加的任何東西），只需要開這一個洞，
+#     新增服務不用回來改這支腳本。caddy-proxy 現在同時綁在兩個獨立的
+#     WireGuard interface 上（見下面 REDIRECT 那段、debian.yml 兩套
+#     WireGuard 身分的說明），所以這裡要各開一條：
+#     - {{ wireguard_cluster_peer_subnet }}：cluster 的 peer（管理面存取、
+#       以後的 k3s cluster 流量）。
+#     - {{ wireguard_infrastructure_peer_subnet }}：infrastructure 的 peer
+#       （不屬於任何單一 cluster、多個 cluster 共用的基礎設施，目前只有
+#       Harbor）——這裡的存取邊界是「誰拿得到 infrastructure 的 peer 金鑰」
+#       （見 /srv/network/infrastructure/ 底下的認領腳本），ufw/REDIRECT
+#       這層只管埠通不通，管不到 Caddy 裡面是哪個 hostname/site，這是
+#       刻意接受的邊界劃分，不是疏漏。
 #     - {{ lan_subnet }}：這台 VM 以後要當 k3s host 用時，其他 server 通常
 #       會跟它在同一個實體 LAN 網段，不一定會透過 WireGuard 連——目前還沒有
 #       設計 agent-to-agent 或 server mesh 的連線方式，直接放行同網段是現階段
@@ -51,10 +59,16 @@ fi
 #     default deny incoming 擋掉。
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow from {{ lan_subnet }} to any port {{ wireguard_listen_port }} proto udp
-ufw allow from {{ wireguard_peer_subnet }} to any port {{ vm_ssh_port }} proto tcp
-ufw allow from {{ wireguard_peer_subnet }} to any port 123 proto udp
-ufw allow from {{ wireguard_peer_subnet }} to any port {{ caddy_proxy_internal_port }} proto tcp
+ufw allow from {{ lan_subnet }} to any port {{ wireguard_cluster_listen_port }} proto udp
+{% if is_infrastructure_host %}
+ufw allow from {{ lan_subnet }} to any port {{ wireguard_infrastructure_listen_port }} proto udp
+{% endif %}
+ufw allow from {{ wireguard_cluster_peer_subnet }} to any port {{ vm_ssh_port }} proto tcp
+ufw allow from {{ wireguard_cluster_peer_subnet }} to any port 123 proto udp
+ufw allow from {{ wireguard_cluster_peer_subnet }} to any port {{ caddy_proxy_internal_port }} proto tcp
+{% if is_infrastructure_host %}
+ufw allow from {{ wireguard_infrastructure_peer_subnet }} to any port {{ caddy_proxy_internal_port }} proto tcp
+{% endif %}
 ufw allow from {{ lan_subnet }} to any port {{ caddy_proxy_internal_port }} proto tcp
 
 # caddy-proxy 是 rootless 使用者，容器對外發布的埠（podman -p，實際在主機
@@ -63,17 +77,20 @@ ufw allow from {{ lan_subnet }} to any port {{ caddy_proxy_internal_port }} prot
 # port_start 這個系統層級的 sysctl，但那樣等於讓「所有」unprivileged 行程
 # 都能 bind 443 以上的埠，範圍比真正需要的大。改成在這裡（root 身份，這支
 # 腳本本來就是開機第一次用 root 跑的）用 nat table 的 REDIRECT，把「進到
-# wg0 介面、目標埠 443」的封包在 kernel 層直接改寫成 {{ caddy_proxy_internal_port }}
-# ——caddy-proxy 容器實際監聽、發布的就是這個高位埠（見
-# caddy-proxy-install.yml），全程沒有任何 unprivileged 行程真的去 bind
-# 特權埠，安全姿態跟 k3s 的 Traefik 一樣（Traefik pod 本身也只監聽高位埠，
-# 80/443 轉發是 host 端用 root 身份的 kube-proxy/ServiceLB 處理掉的）。
+# wg-cluster/wg-infrastructure 介面、目標埠 443」的封包在 kernel 層直接
+# 改寫成 {{ caddy_proxy_internal_port }}——caddy-proxy 容器實際監聽、發布的
+# 就是這個高位埠（見 caddy-proxy-install.yml），全程沒有任何 unprivileged
+# 行程真的去 bind 特權埠，安全姿態跟 k3s 的 Traefik 一樣（Traefik pod 本身
+# 也只監聽高位埠，80/443 轉發是 host 端用 root 身份的 kube-proxy/ServiceLB
+# 處理掉的）。
 #
 # REDIRECT 這個 target 的行為是把封包的目的位址改寫成「封包進來那個介面
-# 本身的位址」（這裡就是 {{ wireguard_vm_address }}），不是 127.0.0.1——
-# 這代表 caddy-proxy 的 podman -p 一定要明確綁
-# {{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }}，不能只寫埠號
-# 監聽所有介面，否則改寫後的目的位址對不上任何監聽中的 socket。
+# 本身的位址」，不是 127.0.0.1——兩個介面各自的位址不一樣
+# （{{ wireguard_cluster_vm_address }}、{{ wireguard_infrastructure_vm_address }}），
+# 所以要各寫一條 REDIRECT 規則，不能只寫一條。這也代表 caddy-proxy 的
+# podman -p 要同時明確綁這兩個位址（各自搭配
+# {{ caddy_proxy_internal_port }}），不能只寫埠號監聽所有介面，否則改寫後
+# 的目的位址對不上任何監聽中的 socket。
 #
 # 用 /etc/ufw/before.rules 加 *nat 區塊，不是直接呼叫 iptables：這支腳本
 # 跑完之後呼叫的是 ufw（不是裸的 iptables），ufw 自己的規則來源只認它管理
@@ -102,7 +119,10 @@ if ! grep -q '^\*nat$' /etc/ufw/before.rules; then
   nat_block=$(cat <<'EOF'
 *nat
 :PREROUTING ACCEPT [0:0]
--A PREROUTING -i wg0 -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
+-A PREROUTING -i wg-cluster -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
+{% if is_infrastructure_host %}
+-A PREROUTING -i wg-infrastructure -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
+{% endif %}
 COMMIT
 EOF
 )

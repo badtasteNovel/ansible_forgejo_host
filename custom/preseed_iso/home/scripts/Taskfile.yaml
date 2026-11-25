@@ -1,0 +1,20 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+# 這份 Taskfile 裝在 VM 上的 ~/scripts/Taskfile.yaml，是這台 VM 自己的
+# 日常操作工具（目前只有 wireguard namespace），跟這個 repo 自己根目錄
+# 的 Taskfile.yaml 是兩個完全獨立的東西，只是借用同一個慣例（namespace
+# include）——不要搞混，這份是給裝好的 VM 上的 charlie 用的，不是給
+# 控制端用的。
+
+includes:
+  wireguard: ./wireguard/wireguard.yaml
+
+tasks:
+  require-sudo:
+    desc: "🔑 預先取得 sudo 權限"
+    silent: true
+    interactive: true
+    cmds:
+      - echo "此任務需要管理員權限，請輸入密碼："
+      - sudo -v

@@ -48,12 +48,17 @@
 # http://10.0.2.2:45443/... 真的連得到主機 127.0.0.1:45443 上的 Harbor API。
 # 每個 site 設定的 reverse_proxy 目標要指向這個 10.0.2.2，不是 127.0.0.1
 # （127.0.0.1 在這個獨立 network namespace 裡只會指向 caddy-proxy 容器
-# 自己）。對外監聽改用 -p {{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }}
-# 明確發布（{{ caddy_proxy_internal_port }} 是高位埠，不是 client 端實際連
-# 的 443——443 不碰、也不用放寬任何 sysctl，見下面「特權埠」那段跟
-# firewall.sh.j2 自己的說明），不再靠 --network=host 隱含共用主機介面——
-# 這也讓每個 site 設定不用再寫 bind {{ wireguard_vm_address }}：容器自己
-# 獨立的 network namespace 裡監聽哪個位址完全無關緊要，外部唯一能連進來
+# 自己）。對外監聽改用兩個 -p 明確發布（caddy-proxy 現在同時綁在兩個
+# 獨立的 WireGuard interface 上——cluster 跟 infrastructure，見 debian.yml
+# 兩套 WireGuard 身分的說明；目前只有 Harbor 需要透過 infrastructure 被
+# 多個 cluster 共用，其他服務維持走 cluster）：
+#   {{ wireguard_cluster_vm_address }}:{{ caddy_proxy_internal_port }}
+#   {{ wireguard_infrastructure_vm_address }}:{{ caddy_proxy_internal_port }}
+# {{ caddy_proxy_internal_port }} 是高位埠，不是 client 端實際連的 443——
+# 443 不碰、也不用放寬任何 sysctl，見下面「特權埠」那段跟 firewall.sh.j2
+# 自己的說明，不再靠 --network=host 隱含共用主機介面——這也讓每個 site
+# 設定不用再寫 bind：容器自己獨立的 network namespace 裡監聽哪個位址完全
+# 無關緊要，外部唯一能連進來
 # 的路徑就是這個 -p 明確指定的那一個，限制已經在這一層做掉了。
 
 - name: '在 VM 上把 Caddy 反代架起來（podman，rootless，TLS 集中終止，tls internal 自動簽發/續期）'
@@ -135,7 +140,10 @@
           ExecStartPre=-/usr/bin/podman rm -f caddy-proxy
           ExecStart=/usr/bin/podman run -d --name caddy-proxy \
             --network slirp4netns:allow_host_loopback=true \
-            -p {{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
+            -p {{ wireguard_cluster_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
+{% if is_infrastructure_host %}
+            -p {{ wireguard_infrastructure_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
+{% endif %}
             -v {{ caddy_proxy_home }}/Caddyfile:/etc/caddy/Caddyfile:z,ro \
             -v {{ caddy_proxy_sites_dir }}:/etc/caddy/sites.d:z,ro \
             -v {{ caddy_proxy_data_dir }}:/data:z,rw \
@@ -157,9 +165,9 @@
         - systemctl --user daemon-reload
         - systemctl --user enable --now caddy-proxy.service
 
-    - name: '確認 caddy-proxy 真的開始服務了（改用 wait_for 直接探真正在意的事：{{ wireguard_vm_address }}:{{ caddy_proxy_internal_port }} 這個 TCP port 有沒有人在聽——不是問 podman 自己說容器是不是 running。原本用 podman ps --filter status=running 配 retries/delay 手動輪詢，在這台機器上實測過會不可靠：become_user 這種單純切身份、沒走過真正 PAM session 的呼叫方式，這個專案已經在別處撞過 podman 子指令本身回報失準的案例（podman info 的那段），這裡大概是同一類問題——retries 10 次撞完都看不到容器，但幾秒後用同一條指令手動重跑、或改用 systemctl --user restart 重跑，容器立刻正常起來，代表問題在「問 podman 這件事」本身不穩，不是容器真的沒起來。wait_for 直接量測外部可觀察到的真實狀態（port 通不通），不透過 podman CLI 的自我回報，也不需要 become/become_user/rootless_podman_env 這一整套——connection: local 搭配 hosts: localhost，這個 TCP 連線本就是從 VM 自己的網路堆疊發出去的，跟真的從外部 curl 這個 port 是完全一樣的檢驗）'
+    - name: '確認 caddy-proxy 真的開始服務了（改用 wait_for 直接探真正在意的事：{{ wireguard_cluster_vm_address }}:{{ caddy_proxy_internal_port }} 這個 TCP port 有沒有人在聽——不是問 podman 自己說容器是不是 running。原本用 podman ps --filter status=running 配 retries/delay 手動輪詢，在這台機器上實測過會不可靠：become_user 這種單純切身份、沒走過真正 PAM session 的呼叫方式，這個專案已經在別處撞過 podman 子指令本身回報失準的案例（podman info 的那段），這裡大概是同一類問題——retries 10 次撞完都看不到容器，但幾秒後用同一條指令手動重跑、或改用 systemctl --user restart 重跑，容器立刻正常起來，代表問題在「問 podman 這件事」本身不穩，不是容器真的沒起來。wait_for 直接量測外部可觀察到的真實狀態（port 通不通），不透過 podman CLI 的自我回報，也不需要 become/become_user/rootless_podman_env 這一整套——connection: local 搭配 hosts: localhost，這個 TCP 連線本就是從 VM 自己的網路堆疊發出去的，跟真的從外部 curl 這個 port 是完全一樣的檢驗）'
       ansible.builtin.wait_for:
-        host: "{{ wireguard_vm_address }}"
+        host: "{{ wireguard_cluster_vm_address }}"
         port: "{{ caddy_proxy_internal_port }}"
         timeout: 300 # wait_for 一旦量到 port 通了就立刻回來，不會真的等滿這個數字——timeout 只是「真的卡住」時的上限，拉長不影響正常情況的等待時間，只是讓偶發的慢啟動有更多餘裕，不會提早被判定失敗
 
@@ -228,5 +236,5 @@
     - name: '印出結果（journalctl -u bootstrap-caddy-proxy 看得到這段）'
       ansible.builtin.debug:
         msg:
-          - "Caddy 反代已就緒，監聽 {{ wireguard_vm_address }}:{{ caddy_proxy_https_port }}（只能從 WireGuard 隧道連）"
+          - "Caddy 反代已就緒，監聽 {{ wireguard_cluster_vm_address }}:{{ caddy_proxy_https_port }}（只能從 WireGuard 隧道連）"
           - "目前代理的服務數量：{{ caddy_proxy_site_files.files | length }}（每多裝一個服務，這裡會多一個 site 設定）"

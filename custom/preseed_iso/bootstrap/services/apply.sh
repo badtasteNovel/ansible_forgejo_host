@@ -52,8 +52,6 @@ HARBOR_USERNAME=$(jq -r '.harbor_username' <<<"$answers")
 HARBOR_PASSWORD=$(jq -r '.harbor_password' <<<"$answers")
 WIREGUARD_VM_ADDRESS=$(jq -r '.wireguard_vm_address' <<<"$answers")
 
-"$SCRIPT_DIR/software-install.sh"
-
 # squid.sh 要排在 ensure_ee_image 之前——EE image build 需要先有 squid
 # 正向代理才連得出去（full bump，見該腳本自己的說明）。squid.sh 不需要
 # 表單欄位，直接執行即可，不像 harbor.sh 需要 source 進來呼叫函式。

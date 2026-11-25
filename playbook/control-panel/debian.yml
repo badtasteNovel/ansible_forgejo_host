@@ -90,11 +90,39 @@
     caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠（單一埠 + hostname 分流，不是一個服務一個埠）——這是給「人/client 端」看的值，從頭到尾沒變過
     caddy_proxy_internal_port: 8443 # Caddy 容器自己實際監聽的埠（>1024），不是 443——rootless 的 caddy-proxy 用 podman -p 發布埠時，實際在主機這邊 bind 的是 podman 自己的 rootlessport 這支 helper，一樣是 unprivileged 身份，bind <1024 的特權埠一樣會被擋。443→8443 的轉換改成在 firewall.sh.j2 用 root 身份的 nat REDIRECT 規則做掉（進到 wg0、目標埠 443 的封包，在 kernel 層直接轉成 8443），不需要放寬 net.ipv4.ip_unprivileged_port_start 這個系統層級設定，安全姿態跟 k3s 的 Traefik 一樣：沒有任何 unprivileged 行程真的去 bind 特權埠。caddy-proxy-install.yml 的 podman -p、firewall.sh.j2 的 ufw allow、harbor-install.yml 渲染 harbor.caddy 用的 site 監聽埠都是這個值，不是 caddy_proxy_https_port
 
-    wireguard_vm_address: "10.105.0.1"
-    wireguard_peer_subnet: "10.105.0.0/24" # charlie 的 authorized_keys 用這個限制 from=，只接受從任一合法 WireGuard peer 連進來
-    wireguard_listen_port: 51820
+    # 兩套獨立的 WireGuard 身分，不是一套：cluster 是跟 WireGuard 本身同等級
+    # 的強制功能，管理面存取（SSH）、以後要接的 k3s cluster 流量都走這條，
+    # VM 自己固定是 .1——這是這個專案的慣例（每個 cluster 自己的
+    # control-panel 永遠是自己這個 /24 網段的 .1，不同 cluster 的這個網段
+    # 互相隔離、不互通，不會衝突，跟 Docker 預設 bridge 永遠是 172.17.0.1
+    # 同一個道理）。infrastructure 是另一套完全獨立的 WireGuard 網段，給
+    # 「不屬於任何單一 cluster、但多個 cluster 都要共用」的基礎設施用
+    # （目前只有 Harbor——一個 Harbor 要給多個 k3s cluster 當 pull-through
+    # cache，如果 Harbor 只能透過 cluster 自己的 WireGuard 網段存取，其他
+    # cluster 的節點就連不到，這正是這套獨立網段存在的理由）。兩套的 peer
+    # 認領方式也不一樣：cluster 沿用既有的「build 時預先生成匿名 peer slot，
+    # 事後用 playbook/wsl/add-peer.yml 認領」機制（管理面存取，數量/身分在
+    # build 時就該決定好）；infrastructure 沒有對應的 Ansible 自動化，是用
+    # /srv/network/infrastructure/ 底下的 shell script 在 VM 上現場產生/
+    # 加入 peer（見該目錄下腳本自己的說明）——兩套機制並存，彼此不取代。
+    wireguard_cluster_vm_address: "10.105.0.1"
+    wireguard_cluster_peer_subnet: "10.105.0.0/24" # charlie 的 authorized_keys 用這個限制 from=，只接受從任一合法 WireGuard peer 連進來
+    wireguard_cluster_listen_port: 51820
+    wireguard_infrastructure_vm_address: "10.104.0.1"
+    wireguard_infrastructure_peer_subnet: "10.104.0.0/24"
+    wireguard_infrastructure_listen_port: 51821 # 不能跟 wireguard_cluster_listen_port 共用同一個埠——同一台主機上兩個獨立的 wg interface，各自要有自己的 UDP 監聽埠
+    # 這幾個常數（位址/子網/埠）是「infrastructure 這個網段長什麼樣子」的
+    # 定義，不是「這台 VM 是不是那個網段的 host」——後者才是真正決定要不要
+    # 實際產生 wg-infrastructure 金鑰/conf/systemd unit、caddy-proxy 要不要
+    # 多綁一個位址、firewall 要不要多開一組洞的旗標。一個網段只能有一個
+    # host（.1），不是每台 control-panel VM 都該無條件產生自己的
+    # 10.104.0.1——這是 custom/scripts/vm-form/debian/main.go 現場問出來的
+    # 值，透過 --extra-vars 傳進來，這裡給預設值 false 純粹是方便本機直接
+    # ansible-playbook 測試（不透過 task build:debian、沒有表單）時不會
+    # 噴 undefined 錯誤，真正的值永遠是表單問出來的。
+    is_infrastructure_host: false
     lan_subnet: "192.168.0.0/24" # 實體 LAN 網段（ESXi host、控制端本機都在這個網段，見 custom/.env.example 的 HYPERVISOR_HOSTNAME=192.168.1.10）——ufw 拿這個限制 WireGuard 監聽埠本身只接受內網來源的 handshake，不開放給整個網際網路
-    peer_slot_count: 0 # 要新增幾個匿名 peer 位置，由 build:debian 的 gum input 透過 --extra-vars 決定
+    peer_slot_count: 0 # 要新增幾個匿名的 cluster peer 位置，由 build:debian 的 gum input 透過 --extra-vars 決定——infrastructure 沒有這種 build 時預先生成的機制，見上面的說明
 
     keys_dir: "{{ playbook_dir }}/../../custom/generated/keys"
     wireguard_keys_base_dir: "{{ keys_dir }}/wireguard-keys" # custom/generated/keys/ 底下按用途分的子資料夾之一
@@ -110,6 +138,7 @@
     preseed_output_dir: "{{ generated_dir }}/preseed/{{ vm_name }}" # 存放要塞進 ISO 的所有檔案（preseed.cfg + host key）
     preseed_srv_output_dir: "{{ preseed_output_dir }}/srv" # preseed_output_dir 底下專門放「裝完機最終會進 VM /srv 底下」那些檔案的子目錄，目錄結構直接對齊最終的 /srv 結構（srv/ansible/、srv/harbor/、srv/caddy/...），late_command 才能用一行 cp -r 整個搬過去，不用每個檔案各寫一行 mkdir/cp/chmod
     preseed_bootstrap_output_dir: "{{ preseed_output_dir }}/bootstrap" # 同一個道理，裝完機最終會進 VM ~{{ vm_user }}/bootstrap 底下的那些一次性檔案（bootstrap-sudo/bootstrap-services/services/——防火牆相關的腳本已經搬到 srv/init/，見 preseed_srv_output_dir）
+    preseed_home_output_dir: "{{ preseed_output_dir }}/home" # 同一個道理，裝完機最終會進 VM ~{{ vm_user }} 底下、但不是一次性的那些檔案（目前只有 scripts/——task/gum 的補裝腳本、~/scripts/wireguard/ 的 Taskfile），跟 bootstrap/ 不一樣：bootstrap/ 整組是一次性、跑完會自我刪除，這裡的東西是打算長期留著用的，所以不能也不該放進 bootstrap/
     iso_output_dir: "{{ generated_dir }}/iso/{{ vm_name }}"
     preseed_output_iso: "{{ iso_output_dir }}/{{ vm_name }}-preseed.iso"
     vmx_output_path: "{{ iso_output_dir }}/{{ vm_name }}.vmx"
@@ -194,13 +223,22 @@
         - { src: "{{ ssh_host_key_path }}", dest: ssh_host_key, mode: "0600" }
         - { src: "{{ ssh_host_key_path }}.pub", dest: ssh_host_key.pub, mode: "0644" }
 
-    - name: '確保 VM 自己的 WireGuard 金鑰已經產生（只有 VM 自己的身分，跟 peer 金鑰完全分開）'
+    - name: '確保 VM 自己的 cluster WireGuard 金鑰已經產生（只有 VM 自己的身分，跟 peer 金鑰完全分開）'
       ansible.builtin.include_tasks:
         file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/wireguard_keys/vm_key.yml"
       vars:
         wireguard_keys_dir: "{{ wireguard_keys_base_dir }}"
+        wireguard_key_name: cluster
 
-    - name: "新增 {{ peer_slot_count }} 個匿名的 WireGuard peer 位置（還沒被任何機器認領，數量由 custom/scripts/tasks/go-task/build-vm.yaml 的 gum input 決定）"
+    - name: '確保 VM 自己的 infrastructure WireGuard 金鑰已經產生（跟 cluster 那組完全獨立，見上面兩套身分的說明；只有這台 VM 真的是 infrastructure 的 host 才需要，不是每台 VM 都無條件產生）'
+      ansible.builtin.include_tasks:
+        file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/wireguard_keys/vm_key.yml"
+      vars:
+        wireguard_keys_dir: "{{ wireguard_keys_base_dir }}"
+        wireguard_key_name: infrastructure
+      when: is_infrastructure_host | bool
+
+    - name: "新增 {{ peer_slot_count }} 個匿名的 cluster WireGuard peer 位置（還沒被任何機器認領，數量由 custom/scripts/tasks/go-task/build-vm.yaml 的 gum input 決定；infrastructure 沒有這種機制，見上面的說明）"
       ansible.builtin.include_tasks:
         file: "{{ playbook_dir }}/../../custom/scripts/tasks/ansible/wireguard_keys/generate_one_peer_slot.yml"
       loop: "{{ range(0, peer_slot_count | int) | list }}"
@@ -208,41 +246,85 @@
         label: "第 {{ item + 1 }} 個"
       when: (peer_slot_count | int) > 0
 
-    - name: '讀取 VM 自己的 WireGuard 私鑰'
+    - name: '讀取 VM 自己的 cluster WireGuard 私鑰'
       ansible.builtin.slurp:
-        src: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard"
-      register: wireguard_vm_private_key_raw
+        src: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard_cluster"
+      register: wireguard_cluster_private_key_raw
 
-    - name: '列出目前已經存在的 WireGuard peer 目錄（數量不固定，可能是 0 個）'
+    - name: '讀取 VM 自己的 infrastructure WireGuard 私鑰（只有這台 VM 是 host 才存在，見上面產生金鑰那個 task 的 when）'
+      ansible.builtin.slurp:
+        src: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard_infrastructure"
+      register: wireguard_infrastructure_private_key_raw
+      when: is_infrastructure_host | bool
+
+    - name: '列出目前已經存在的 cluster WireGuard peer 目錄（數量不固定，可能是 0 個；infrastructure 沒有對應的目錄，peer 是開機後用 /srv/network/infrastructure/ 的 shell script 現場加的，不是 build 時列出來的）'
       ansible.builtin.find:
         paths: "{{ wireguard_peers_dir }}"
         file_type: directory
-      register: wireguard_peer_dirs
+      register: wireguard_cluster_peer_dirs
 
-    - name: '讀出每個 peer 的公鑰／PresharedKey／IP，組成清單（給 wg0.conf.j2 的 Peer 迴圈用）'
+    - name: '讀出每個 cluster peer 的公鑰／PresharedKey／IP，組成清單（給 wg-cluster.conf.j2 的 Peer 迴圈用）'
       ansible.builtin.set_fact:
-        wireguard_peers: "{{ wireguard_peers | default([]) + [{
+        wireguard_cluster_peers: "{{ wireguard_cluster_peers | default([]) + [{
           'name': item.path | basename,
           'public_key': lookup('file', item.path + '/public') | trim,
           'preshared_key': lookup('file', item.path + '/psk') | trim,
           'address': lookup('file', item.path + '/address') | trim,
         }] }}"
-      loop: "{{ wireguard_peer_dirs.files }}"
+      loop: "{{ wireguard_cluster_peer_dirs.files }}"
       loop_control:
         label: "{{ item.path | basename }}"
 
-    - name: '渲染 VM 的 wg0.conf，放進 ISO 注入資料夾（Peer 區塊數量跟著 wireguard_peers 走，可能是 0 個）'
+    - name: '建立 ISO 注入資料夾裡的 wireguard/cluster/ 目錄——wg-cluster.conf／.key 都放這裡，late_command 直接整個目錄 cp -r 到 /etc/wireguard/cluster，不用一個檔案一個檔案搬（跟 bootstrap/、srv/ 整包 copy 進 ISO 是同一個「目錄結構直接對齊最終路徑、late_command 整個 cp -r」慣例，只是這裡是逐步渲染/複製單個檔案進來，所以需要先手動建好目錄，不像 bootstrap/srv 那樣整包 copy 自己就會建好）'
+      ansible.builtin.file:
+        path: "{{ preseed_output_dir }}/wireguard/cluster"
+        state: directory
+        mode: "0700"
+
+    - name: '建立 ISO 注入資料夾裡的 wireguard/infrastructure/ 目錄——只有這台 VM 是 infrastructure host 才需要（見上面兩套 WireGuard 身分的說明）'
+      ansible.builtin.file:
+        path: "{{ preseed_output_dir }}/wireguard/infrastructure"
+        state: directory
+        mode: "0700"
+      when: is_infrastructure_host | bool
+
+    - name: '渲染 VM 的 wg-cluster.conf，放進 ISO 注入資料夾（Peer 區塊數量跟著 wireguard_cluster_peers 走，可能是 0 個）'
       ansible.builtin.template:
-        src: "{{ playbook_dir }}/../../custom/template/wireguard_control_panel/wg0.conf.j2"
-        dest: "{{ preseed_output_dir }}/wg0.conf"
+        src: "{{ playbook_dir }}/../../custom/template/wireguard_control_panel/wg-cluster.conf.j2"
+        dest: "{{ preseed_output_dir }}/wireguard/cluster/wg-cluster.conf"
         mode: "0600"
       vars:
-        wireguard_private_key: "{{ (wireguard_vm_private_key_raw.content | b64decode).strip() }}"
-        # wireguard_peers 不在這裡重新宣告——理由跟之前 enable_wireguard 那次
-        # 踩到的坑一樣：task 的 vars: 裡用同名又參照自己會造成無窮遞迴
-        # templating。wireguard_peers 這個 fact 本來就看得到（一個 peer 都
-        # 沒有時完全不會被 set_fact 設到，是 undefined，不是空字串／false，
-        # 所以 wg0.conf.j2 裡用 `wireguard_peers | default([])` 接住就好）。
+        wireguard_private_key: "{{ (wireguard_cluster_private_key_raw.content | b64decode).strip() }}"
+        wireguard_vm_address: "{{ wireguard_cluster_vm_address }}"
+        wireguard_listen_port: "{{ wireguard_cluster_listen_port }}"
+        wireguard_peers: "{{ wireguard_cluster_peers | default([]) }}"
+        # wireguard_cluster_peers 本來就看得到，不需要在這裡用 set_fact 宣告
+        # 成別的名字——理由跟之前 enable_wireguard 那次踩到的坑一樣：task 的
+        # vars: 裡用同名又參照自己會造成無窮遞迴 templating，這裡直接接到
+        # wg-cluster.conf.j2 自己要用的 wireguard_peers 這個名字即可，一個
+        # peer 都沒有時完全不會被 set_fact 設到，是 undefined，不是空字串／
+        # false，套 default([]) 接住就好。
+
+    - name: '渲染 VM 的 wg-infrastructure.conf，放進 ISO 注入資料夾（沒有 Peer 迴圈——infrastructure 的 peer 不是 build 時預先產生的，一律是空的 [Interface]-only 設定，裝機後由 /srv/network/infrastructure/ 的 shell script 現場加；只有這台 VM 是 host 才需要這份檔案）'
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../../custom/template/wireguard_control_panel/wg-infrastructure.conf.j2"
+        dest: "{{ preseed_output_dir }}/wireguard/infrastructure/wg-infrastructure.conf"
+        mode: "0600"
+      vars:
+        wireguard_private_key: "{{ (wireguard_infrastructure_private_key_raw.content | b64decode).strip() }}"
+        wireguard_vm_address: "{{ wireguard_infrastructure_vm_address }}"
+        wireguard_listen_port: "{{ wireguard_infrastructure_listen_port }}"
+      when: is_infrastructure_host | bool
+
+    - name: '把 VM 自己的 WireGuard 私鑰原始內容也放進 ISO 注入資料夾（跟 .conf 內嵌的那份是同一個值，見 custom/preseed_iso/srv/network/*/show.sh 自己的說明：這份檔案是給 show.sh/peer 認領腳本直接讀取用的，不是重新生成一份不同的金鑰）——cluster 無條件跑，infrastructure 只有這台 VM 是 host 才有對應的金鑰可以複製'
+      ansible.builtin.copy:
+        src: "{{ wireguard_keys_base_dir }}/{{ vm_name }}_wireguard_{{ item }}"
+        dest: "{{ preseed_output_dir }}/wireguard/{{ item }}/wg-{{ item }}.key"
+        mode: "0600"
+      loop:
+        - cluster
+        - infrastructure
+      when: item == 'cluster' or (is_infrastructure_host | bool)
 
     - name: "編譯 bootstrap-sudo（charlie SSH 進去後可以自己選擇要不要手動執行的一次性救援腳本，見 custom/scripts/bootstrap-sudo/main.go 開頭說明；go run 不適用——這支要跑在 VM 上，VM 不會有 Go 工具鏈、也不會有這份原始碼，所以這裡要交叉編譯成靜態執行檔，直接塞進 ISO）——放進 preseed_bootstrap_output_dir，直接對齊最終 ~{{ vm_user }}/bootstrap/ 的結構"
       ansible.builtin.command:
@@ -260,7 +342,7 @@
         dest: "{{ preseed_srv_output_dir }}/"
         mode: "0600"
 
-    - name: '渲染 srv/init/firewall.sh（late_command 在 d-i chroot 裡套用 ufw 規則不可靠，實測會悄悄 fail-open，見該樣板開頭說明；這支腳本靠 preseed.cfg.j2 寫的 firewall.service 在 VM 真正開機後自動跑一次，才是能安全呼叫 ufw enable 的地方）——上面那個 copy task 已經把原始 .j2 樣板搬過去了，這裡用同一個來源樣板渲染出同名、無 .j2 的正式檔案蓋掉它；跟 podman-network.sh/finalizer.sh 不一樣，這支需要 lan_subnet/wireguard_listen_port 這些值，不是純文字，所以單獨多一個 template task，不能只靠上面的整包 copy'
+    - name: '渲染 srv/init/firewall.sh（late_command 在 d-i chroot 裡套用 ufw 規則不可靠，實測會悄悄 fail-open，見該樣板開頭說明；這支腳本靠 preseed.cfg.j2 寫的 firewall.service 在 VM 真正開機後自動跑一次，才是能安全呼叫 ufw enable 的地方）——上面那個 copy task 已經把原始 .j2 樣板搬過去了，這裡用同一個來源樣板渲染出同名、無 .j2 的正式檔案蓋掉它；跟 podman-network.sh/finalizer.sh 不一樣，這支需要 lan_subnet/wireguard_cluster_listen_port 這些值，不是純文字，所以單獨多一個 template task，不能只靠上面的整包 copy'
       ansible.builtin.template:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/srv/init/firewall.sh.j2"
         dest: "{{ preseed_srv_output_dir }}/init/firewall.sh"
@@ -307,6 +389,12 @@
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/bootstrap/dns-apply.sh"
         dest: "{{ preseed_bootstrap_output_dir }}/dns-apply.sh"
+        mode: "0700"
+
+    - name: "把 custom/preseed_iso/home/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 ~{{ vm_user }} 底下的結構（目前只有 scripts/：task/gum 的補裝腳本、~/scripts/wireguard/ 的 Taskfile），跟 bootstrap/ 不一樣，這裡的東西不是一次性的，裝好之後會長期留著用（見上面 preseed_home_output_dir 的說明）"
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../custom/preseed_iso/home/"
+        dest: "{{ preseed_home_output_dir }}/"
         mode: "0700"
 
     - name: '渲染 preseed.cfg'
@@ -403,10 +491,10 @@
           - "2. 手動 Power On"
           - "3. 開機、preseed 無人值守安裝跑完後，自己查一下 VM 的 LAN IP（唯一用途：等一下 task add-peer 要用）"
           - "4. 跑 task add-peer——把目前這台機器加進 WireGuard、接通隧道、順便把 known_hosts 跟 SSH 私鑰準備好（VM 的 LAN IP 就是這時候用）"
-          - "5. 接通之後，SSH 連線固定走 WireGuard 位址 {{ wireguard_vm_address }}，不是 VM 的 LAN IP——連線細節看 task add-peer 跑完印出的提示"
+          - "5. 接通之後，SSH 連線固定走 WireGuard 位址 {{ wireguard_cluster_vm_address }}，不是 VM 的 LAN IP——連線細節看 task add-peer 跑完印出的提示"
 
     - name: '印出 bootstrap-services 的後續資訊'
       ansible.builtin.debug:
         msg:
           - "6. VM 開機、SSH 進去之後，跑 sudo ~/bootstrap/bootstrap-services——互動問要不要在本機裝 Harbor（還是接一個已經存在的外部 Harbor），裝好/接上之後才會接著裝 caddy-proxy（caddy-proxy 本身是強制功能，但要等這支程式把 Harbor 這塊決定完才會真的執行安裝，這樣 caddy-proxy 自己要拉的 image 才吃得到 Harbor 的 pull-through cache）。"
-          - "   選了在本機裝 Harbor 的話，表單會問要用哪個 hostname（裝好之後走 https://<這個值>:{{ caddy_proxy_https_port }}，只能從 WireGuard 隧道連，admin 密碼就是 custom/.env 的 HARBOR_ADMIN_PASSWORD）——這個值現在是開機後才決定，裝機前不知道，peer 端自己的 hosts 檔案要先加一行指到 {{ wireguard_vm_address }}，名字填表單當時選的那個。"
+          - "   選了在本機裝 Harbor 的話，表單會問要用哪個 hostname（裝好之後走 https://<這個值>:{{ caddy_proxy_https_port }}，只能從 WireGuard 隧道連，admin 密碼就是 custom/.env 的 HARBOR_ADMIN_PASSWORD）——這個值現在是開機後才決定，裝機前不知道，peer 端自己的 hosts 檔案要先加一行指到 {{ wireguard_cluster_vm_address }}，名字填表單當時選的那個。"

@@ -5,4 +5,6 @@
 # 東西最後用不用得到要看 bootstrap-services 的決定）。
 caddy_proxy_user: "{{ caddy_proxy_user }}"
 caddy_proxy_home: "{{ caddy_proxy_home }}"
-wireguard_vm_address: "{{ wireguard_vm_address }}"
+wireguard_cluster_vm_address: "{{ wireguard_cluster_vm_address }}"
+wireguard_infrastructure_vm_address: "{{ wireguard_infrastructure_vm_address }}" # 只有 is_infrastructure_host 是 true 才會真的被拿來多綁一個 -p，見下面那個欄位
+is_infrastructure_host: {{ is_infrastructure_host | bool | lower }} # caddy-proxy 要不要多綁 wireguard_infrastructure_vm_address 這個位址，看這台 VM 是不是 infrastructure 的 host（見 debian.yml 兩套 WireGuard 身分的說明），不是每台 VM 都無條件綁兩個位址

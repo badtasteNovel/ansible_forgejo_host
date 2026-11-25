@@ -6,6 +6,12 @@
 # 的公鑰才能組出自己的 wg0.conf，即使 control-panel 還沒跑過也一樣）——
 # idempotent，不管哪邊先跑都行。
 #
+# VM 現在有兩套獨立的 WireGuard 身分（cluster 跟 infrastructure，見
+# playbook/control-panel/debian.yml 開頭的說明），這個檔案被呼叫兩次，各給
+# 一套——呼叫端要先 set 好 wireguard_key_name（"cluster" 或
+# "infrastructure"），金鑰檔名用 {{ vm_name }}_wireguard_{{ wireguard_key_name }}
+# 區分兩套，不會互相覆蓋。
+#
 # 金鑰檔名用 {{ vm_name }} 當前綴——呼叫前，呼叫端要讓 vm_name 這個變數在
 # 當下的範圍內看得到（兩個呼叫端都已經把它列為必填的 play 層級變數）。
 
@@ -15,11 +21,11 @@
     state: directory
     mode: "0700"
 
-- name: '產生 VM 自己的 WireGuard 金鑰對（若已存在則不重建）'
+- name: "產生 VM 自己的 {{ wireguard_key_name }} WireGuard 金鑰對（若已存在則不重建）"
   ansible.builtin.shell: |
     set -euo pipefail
     umask 077
-    wg genkey | tee {{ wireguard_keys_dir }}/{{ vm_name }}_wireguard | wg pubkey > {{ wireguard_keys_dir }}/{{ vm_name }}_wireguard.pub
+    wg genkey | tee {{ wireguard_keys_dir }}/{{ vm_name }}_wireguard_{{ wireguard_key_name }} | wg pubkey > {{ wireguard_keys_dir }}/{{ vm_name }}_wireguard_{{ wireguard_key_name }}.pub
   args:
     executable: /bin/bash # /bin/sh（dash）不支援 pipefail，這裡用到 wg genkey | tee | wg pubkey 的管線，一定要 bash
-    creates: "{{ wireguard_keys_dir }}/{{ vm_name }}_wireguard"
+    creates: "{{ wireguard_keys_dir }}/{{ vm_name }}_wireguard_{{ wireguard_key_name }}"
