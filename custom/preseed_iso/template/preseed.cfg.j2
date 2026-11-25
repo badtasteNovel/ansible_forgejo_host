@@ -100,24 +100,6 @@ d-i grub-installer/bootdev string default
 ### Finishing installation
 d-i finish-install/reboot_in_progress note
 
-### late_command 裡會寫一個 {{ vm_user }} 自己的 systemd --user unit
-### （software-install.service，裝 task/gum 到 ~/.local/bin，見
-### custom/preseed_iso/home/scripts/software-install.sh 自己的說明，為什麼
-### 這支要刻意不用 root）跟 loginctl enable-linger {{ vm_user }} 的效果——
-### 故意不呼叫 `loginctl enable-linger` 這個指令本身，是直接手動建立它
-### 底層真正會寫的那個檔案（/var/lib/systemd/linger/<user>，一個空檔案，
-### 檔案存在就代表這個使用者要 lingering，這是 systemd-logind 自己文件
-### 記載的機制，不是猜的）：loginctl 本身是透過 D-Bus 跟 systemd-logind
-### 講話的，late_command 執行的這個 d-i 安裝環境的 chroot 裡沒有真正在跑
-### 的 systemd-logind 可以讓它連，直接呼叫會卡住或失敗——跟這個專案已經
-### 在 ufw 身上撞過的「late_command 的 in-target 呼叫在 d-i chroot 裡對
-### 真正需要活的系統服務的操作會悄悄失效」是同一類問題，這裡直接繞開
-### 需要活的 D-Bus/systemd-logind 連線這一步，用寫檔案代替呼叫指令。
-### software-install.service 本身也不用 `systemctl --user enable` 開
-### 它——同一個理由，改成手動建 default.target.wants/ 底下的符號連結，
-### 跟 `systemctl --user enable` 實際上會做的事一樣，不需要真的呼叫
-### 這個指令本身。
-###
 ### wg-cluster.conf／wg-infrastructure.conf 的「真正」檔案留在
 ### /etc/wireguard/<segment>/（wg-quick/systemd unit 認的就是這個路徑，
 ### 不能搬走），但在 /srv/network/<segment>/wg-*.conf 這裡額外建一個
@@ -130,7 +112,6 @@ d-i finish-install/reboot_in_progress note
 ### 之後才能建（符號連結本身不要求目標已經存在，但連結要放的那個目錄
 ### /target/srv/network/<segment>/ 得先存在）。
 d-i preseed/late_command string \
-  in-target pipx install ansible-navigator; \
   mkdir -p /target/home/{{ vm_user }}/.ssh; \
   echo 'from="{{ wireguard_cluster_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   cp -r /cdrom/bootstrap /target/home/{{ vm_user }}/bootstrap; \
@@ -142,19 +123,6 @@ d-i preseed/late_command string \
   cp -r /cdrom/home/scripts /target/home/{{ vm_user }}/scripts; \
   chmod -R 700 /target/home/{{ vm_user }}/scripts; \
   in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/scripts; \
-  mkdir -p /target/home/{{ vm_user }}/.config/systemd/user/default.target.wants; \
-  echo '[Unit]' > /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
-  echo 'Description=Install task/gum into ~/.local/bin for {{ vm_user }} (non-root)' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
-  echo '[Service]' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
-  echo 'Type=oneshot' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
-  echo 'RemainAfterExit=yes' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
-  echo 'ExecStart=/home/{{ vm_user }}/scripts/software-install.sh' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
-  echo '[Install]' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
-  echo 'WantedBy=default.target' >> /target/home/{{ vm_user }}/.config/systemd/user/software-install.service; \
-  ln -s ../software-install.service /target/home/{{ vm_user }}/.config/systemd/user/default.target.wants/software-install.service; \
-  in-target chown -R {{ vm_user }}:{{ vm_user }} /home/{{ vm_user }}/.config; \
-  mkdir -p /target/var/lib/systemd/linger; \
-  touch /target/var/lib/systemd/linger/{{ vm_user }}; \
   sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /target/etc/ssh/sshd_config; \
   sed -i '/^Port /d' /target/etc/ssh/sshd_config; \
   echo 'Port {{ ssh_port }}' >> /target/etc/ssh/sshd_config; \
@@ -240,10 +208,28 @@ d-i preseed/late_command string \
   echo '[Install]' >> /target/etc/systemd/system/firewall.service; \
   echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/firewall.service; \
   in-target systemctl enable firewall.service; \
+  echo '[Unit]' > /target/etc/systemd/system/software-install.service; \
+  echo 'ConditionPathExists=/srv/init/software-install.sh' >> /target/etc/systemd/system/software-install.service; \
+  echo 'After=network.target firewall.service' >> /target/etc/systemd/system/software-install.service; \
+  echo 'Requires=firewall.service' >> /target/etc/systemd/system/software-install.service; \
+  echo '[Service]' >> /target/etc/systemd/system/software-install.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/software-install.service; \
+  echo 'User={{ vm_user }}' >> /target/etc/systemd/system/software-install.service; \
+  echo 'Group={{ vm_user }}' >> /target/etc/systemd/system/software-install.service; \
+  echo 'RuntimeDirectory=software-install' >> /target/etc/systemd/system/software-install.service; \
+  echo 'ExecStart=/srv/init/software-install.sh ${RUNTIME_DIRECTORY}' >> /target/etc/systemd/system/software-install.service; \
+  echo 'ExecStart=+/usr/bin/mv ${RUNTIME_DIRECTORY}/task /usr/local/bin/task' >> /target/etc/systemd/system/software-install.service; \
+  echo 'ExecStart=+/usr/bin/mv ${RUNTIME_DIRECTORY}/gum /usr/local/bin/gum' >> /target/etc/systemd/system/software-install.service; \
+  echo 'ExecStart=+/usr/bin/pipx install --global ansible-navigator' >> /target/etc/systemd/system/software-install.service; \
+  echo 'ExecStart=+/bin/rm -rf ${RUNTIME_DIRECTORY}' >> /target/etc/systemd/system/software-install.service; \
+  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/software-install.service; \
+  echo '[Install]' >> /target/etc/systemd/system/software-install.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/software-install.service; \
+  in-target systemctl enable software-install.service; \
   echo '[Unit]' > /target/etc/systemd/system/finalizer.service; \
   echo 'ConditionPathExists=/srv/init/finalizer.sh' >> /target/etc/systemd/system/finalizer.service; \
-  echo 'After=network.target firewall.service' >> /target/etc/systemd/system/finalizer.service; \
-  echo 'Requires=firewall.service' >> /target/etc/systemd/system/finalizer.service; \
+  echo 'After=network.target software-install.service' >> /target/etc/systemd/system/finalizer.service; \
+  echo 'Requires=software-install.service' >> /target/etc/systemd/system/finalizer.service; \
   echo '[Service]' >> /target/etc/systemd/system/finalizer.service; \
   echo 'Type=oneshot' >> /target/etc/systemd/system/finalizer.service; \
   echo 'ExecStart=/srv/init/finalizer.sh' >> /target/etc/systemd/system/finalizer.service; \

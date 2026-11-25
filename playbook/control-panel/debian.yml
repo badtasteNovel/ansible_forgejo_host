@@ -10,7 +10,7 @@
 #      ——實際由哪台機器拿去用，是 playbook/wsl/add-peer.yml 用 glob 認領的事，
 #      這裡完全不管。接著掃描 custom/generated/keys/wireguard-keys/wireguard_peers/
 #      底下目前已經存在的每一個 peer（不管是這次新增的還是之前就有的），各自讀出
-#      自己的公鑰/PresharedKey/IP，動態組出 wg0.conf 的 [Peer] 區塊
+#      自己的公鑰/PresharedKey/IP，動態組出 wg-cluster.conf 的 [Peer] 區塊
 #   3. 渲染 preseed.cfg、重新封裝 ISO（跟之前一樣，remaster-iso.sh 完全沒變邏輯）
 #   4. 渲染 .vmx
 #   5. SSH 進 hypervisor：建資料夾、scp 傳 ISO、scp 傳 .vmx、用 vmkfstools 建兩顆虛擬磁碟
@@ -88,7 +88,7 @@
     caddy_proxy_user: caddy-proxy # rootless 專屬系統使用者，跟 harbor_user 彼此隔離
     caddy_proxy_home: /srv/caddy
     caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠（單一埠 + hostname 分流，不是一個服務一個埠）——這是給「人/client 端」看的值，從頭到尾沒變過
-    caddy_proxy_internal_port: 8443 # Caddy 容器自己實際監聽的埠（>1024），不是 443——rootless 的 caddy-proxy 用 podman -p 發布埠時，實際在主機這邊 bind 的是 podman 自己的 rootlessport 這支 helper，一樣是 unprivileged 身份，bind <1024 的特權埠一樣會被擋。443→8443 的轉換改成在 firewall.sh.j2 用 root 身份的 nat REDIRECT 規則做掉（進到 wg0、目標埠 443 的封包，在 kernel 層直接轉成 8443），不需要放寬 net.ipv4.ip_unprivileged_port_start 這個系統層級設定，安全姿態跟 k3s 的 Traefik 一樣：沒有任何 unprivileged 行程真的去 bind 特權埠。caddy-proxy-install.yml 的 podman -p、firewall.sh.j2 的 ufw allow、harbor-install.yml 渲染 harbor.caddy 用的 site 監聽埠都是這個值，不是 caddy_proxy_https_port
+    caddy_proxy_internal_port: 8443 # Caddy 容器自己實際監聽的埠（>1024），不是 443——rootless 的 caddy-proxy 用 podman -p 發布埠時，實際在主機這邊 bind 的是 podman 自己的 rootlessport 這支 helper，一樣是 unprivileged 身份，bind <1024 的特權埠一樣會被擋。443→8443 的轉換改成在 firewall.sh.j2 用 root 身份的 nat REDIRECT 規則做掉（進到 wg-cluster/wg-infrastructure、目標埠 443 的封包，在 kernel 層直接轉成 8443），不需要放寬 net.ipv4.ip_unprivileged_port_start 這個系統層級設定，安全姿態跟 k3s 的 Traefik 一樣：沒有任何 unprivileged 行程真的去 bind 特權埠。caddy-proxy-install.yml 的 podman -p、firewall.sh.j2 的 ufw allow、harbor-install.yml 渲染 harbor.caddy 用的 site 監聽埠都是這個值，不是 caddy_proxy_https_port
 
     # 兩套獨立的 WireGuard 身分，不是一套：cluster 是跟 WireGuard 本身同等級
     # 的強制功能，管理面存取（SSH）、以後要接的 k3s cluster 流量都走這條，
@@ -138,7 +138,7 @@
     preseed_output_dir: "{{ generated_dir }}/preseed/{{ vm_name }}" # 存放要塞進 ISO 的所有檔案（preseed.cfg + host key）
     preseed_srv_output_dir: "{{ preseed_output_dir }}/srv" # preseed_output_dir 底下專門放「裝完機最終會進 VM /srv 底下」那些檔案的子目錄，目錄結構直接對齊最終的 /srv 結構（srv/ansible/、srv/harbor/、srv/caddy/...），late_command 才能用一行 cp -r 整個搬過去，不用每個檔案各寫一行 mkdir/cp/chmod
     preseed_bootstrap_output_dir: "{{ preseed_output_dir }}/bootstrap" # 同一個道理，裝完機最終會進 VM ~{{ vm_user }}/bootstrap 底下的那些一次性檔案（bootstrap-sudo/bootstrap-services/services/——防火牆相關的腳本已經搬到 srv/init/，見 preseed_srv_output_dir）
-    preseed_home_output_dir: "{{ preseed_output_dir }}/home" # 同一個道理，裝完機最終會進 VM ~{{ vm_user }} 底下、但不是一次性的那些檔案（目前只有 scripts/——task/gum 的補裝腳本、~/scripts/wireguard/ 的 Taskfile），跟 bootstrap/ 不一樣：bootstrap/ 整組是一次性、跑完會自我刪除，這裡的東西是打算長期留著用的，所以不能也不該放進 bootstrap/
+    preseed_home_output_dir: "{{ preseed_output_dir }}/home" # 同一個道理，裝完機最終會進 VM ~{{ vm_user }} 底下、但不是一次性的那些檔案（目前只有 scripts/——~/scripts/wireguard/ 的 Taskfile，task/gum 本身已經改成系統全域裝進 /usr/local/bin，見 srv/init/software-install.sh，不在這裡），跟 bootstrap/ 不一樣：bootstrap/ 整組是一次性、跑完會自我刪除，這裡的東西是打算長期留著用的，所以不能也不該放進 bootstrap/
     iso_output_dir: "{{ generated_dir }}/iso/{{ vm_name }}"
     preseed_output_iso: "{{ iso_output_dir }}/{{ vm_name }}-preseed.iso"
     vmx_output_path: "{{ iso_output_dir }}/{{ vm_name }}.vmx"
@@ -391,7 +391,7 @@
         dest: "{{ preseed_bootstrap_output_dir }}/dns-apply.sh"
         mode: "0700"
 
-    - name: "把 custom/preseed_iso/home/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 ~{{ vm_user }} 底下的結構（目前只有 scripts/：task/gum 的補裝腳本、~/scripts/wireguard/ 的 Taskfile），跟 bootstrap/ 不一樣，這裡的東西不是一次性的，裝好之後會長期留著用（見上面 preseed_home_output_dir 的說明）"
+    - name: "把 custom/preseed_iso/home/ 整個資料夾放進 ISO 注入資料夾——工作目錄結構直接對齊最終 ~{{ vm_user }} 底下的結構（目前只有 scripts/：~/scripts/wireguard/ 的 Taskfile，task/gum 本身已經改成系統全域裝進 /usr/local/bin，見 srv/init/software-install.sh，不在這裡），跟 bootstrap/ 不一樣，這裡的東西不是一次性的，裝好之後會長期留著用（見上面 preseed_home_output_dir 的說明）"
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/../../custom/preseed_iso/home/"
         dest: "{{ preseed_home_output_dir }}/"

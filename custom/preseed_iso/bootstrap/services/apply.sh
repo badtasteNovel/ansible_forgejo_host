@@ -44,13 +44,11 @@ export HARBOR_HOSTNAME
 export HARBOR_URL
 export HARBOR_USERNAME
 export HARBOR_PASSWORD
-export WIREGUARD_VM_ADDRESS
 INSTALL_HARBOR=$(jq -r '.install_harbor' <<<"$answers")
 HARBOR_HOSTNAME=$(jq -r '.harbor_hostname' <<<"$answers")
 HARBOR_URL=$(jq -r '.harbor_url' <<<"$answers")
 HARBOR_USERNAME=$(jq -r '.harbor_username' <<<"$answers")
 HARBOR_PASSWORD=$(jq -r '.harbor_password' <<<"$answers")
-WIREGUARD_VM_ADDRESS=$(jq -r '.wireguard_vm_address' <<<"$answers")
 
 # squid.sh 要排在 ensure_ee_image 之前——EE image build 需要先有 squid
 # 正向代理才連得出去（full bump，見該腳本自己的說明）。squid.sh 不需要
@@ -96,4 +94,10 @@ if [ "$INSTALL_HARBOR" = "true" ]; then
 else
   echo "  已接上外部 Harbor：${harbor_registry}"
 fi
-echo "  caddy-proxy：https://${WIREGUARD_VM_ADDRESS}:${CADDY_PROXY_HTTPS_PORT}"
+# 不問使用者這個位址——直接查 wg-cluster 介面現在真正配到的值，跟
+# dns-apply.sh 查 wg0（現在叫 wg-cluster）位址的做法同一個道理：這個值
+# 永遠有真實來源可查，不需要表單多問一題、也不會有跟真實位址兜不起來的
+# 風險（之前 bootstrap-services 表單有一題 WireguardVMAddress 就是問這個，
+# 改成現場查之後整題拿掉了）。
+wireguard_cluster_address=$(ip -4 -o addr show dev wg-cluster | grep -oP 'inet \K[0-9.]+')
+echo "  caddy-proxy：https://${wireguard_cluster_address}:${CADDY_PROXY_HTTPS_PORT}"

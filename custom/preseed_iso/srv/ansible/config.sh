@@ -11,15 +11,14 @@
 # source 這一份 config.sh 就夠，不用另外多 source 別的東西。
 source /srv/ansible/ee.conf
 
-# PATH 加上 pipx 安裝位置（/root/.local/bin），這樣下面可以直接寫
-# ansible-navigator（裸指令名稱）——這個工具全程以 root 身份跑，pipx 裝
-# 的東西固定在 /root/.local/bin。ansible-builder 已經不是這個專案的
-# 依賴了（見 ensure_ee_image() 的說明），不用再管它的 PATH。
-export PATH="/root/.local/bin:$PATH"
-
-# 確認 ansible-navigator 可用——不負責安裝。這個工具無條件在 late_command
-# 裝機當下就用 pipx 裝好了（見 preseed.cfg.j2），沒有另外的開機後補裝步驟；
-# 這支只檢查，缺了就直接報錯、不嘗試現場補裝。
+# 確認 ansible-navigator 可用——不負責安裝。這個工具不是在 late_command
+# 裝的（pipx install 需要真實網路/完整使用者環境，late_command 的 d-i
+# chroot 不保證——實機撞過，VM 開機後完全找不到這個指令），是 VM 真正
+# 開機後由 /srv/init/software-install.sh 透過自己的 systemd unit
+# 自動裝好（見該腳本自己的說明）；這支只檢查，缺了就直接報錯、不嘗試
+# 現場補裝。裝的目的地是系統全域的 /usr/local/bin（pipx install
+# --global），不是哪個使用者自己的 ~/.local/bin，不需要額外加 PATH——
+# systemd service／互動式 shell 的預設 PATH 本來就含 /usr/local/bin。
 ensure_navigator_tools() {
   if command -v ansible-navigator >/dev/null 2>&1; then
     return 0

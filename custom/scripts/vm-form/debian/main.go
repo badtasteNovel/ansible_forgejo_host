@@ -23,9 +23,19 @@ func main() {
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().Title("VM 名稱").Value(&vmName),
-			huh.NewConfirm().
+			// 用 Select 不用 Confirm——Confirm 的 Yes/No 兩個按鈕，目前選到
+			// 哪一個純粹只靠背景顏色反白區分，沒有任何文字符號，終端機
+			// 顏色顯示不出來（或者輸出被轉貼到別的地方、顏色跟著不見）
+			// 的時候完全看不出來選到哪個。Select 預設會在目前選到的選項
+			// 前面加一個固定的 "> " 文字游標，不管顏色顯不顯示都看得到，
+			// 同一個問題用 Select 不會發生。
+			huh.NewSelect[bool]().
 				Title("這台 VM 要成為 infrastructure 網段（10.104.0.0/24）的 host 嗎？").
-				Description("這個網段是給不屬於任何單一 cluster、多個 cluster 共用的基礎設施用的（目前只有 Harbor）——同一個網段只能有一個 host（.1），不是每台 control-panel VM 都該選是。只有真的要在這台 VM 上跑共用 Harbor 時才選是；其他 VM 要用這個共用 Harbor，是 host 這邊的人自己用 ~/scripts/wireguard 的 task wireguard:add 產生 peer，手動把印出來的設定帶去那台 VM，這一步不自動化。").
+				Description("是否要把這台 VM 設成 10.104.0.1/32 的 WireGuard 位址").
+				Options(
+					huh.NewOption("Yes", true),
+					huh.NewOption("No", false),
+				).
 				Value(&isInfrastructureHost),
 		),
 	)

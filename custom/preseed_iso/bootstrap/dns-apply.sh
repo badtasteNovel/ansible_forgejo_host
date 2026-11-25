@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# 把一個 hostname 對應進 /etc/hosts，指到這台 VM 自己 wg0 介面目前的位址。
+# 把一個 hostname 對應進 /etc/hosts，指到這台 VM 自己 wg-cluster 介面目前的位址。
 #
 # 這個名字從來不是真的 DNS record——其他 WireGuard peer 是自己在本機
 # hosts 檔案把這個名字指到這台 VM（見 playbook/wsl/add-peer.yml 的
@@ -23,16 +23,16 @@ set -euo pipefail
 # apply.sh 之前，自己直接呼叫的一個獨立步驟，混進 services/ 裡會讓人誤會
 # 它是 apply.sh 那條鏈的一環。
 #
-# 目標位址直接查 wg0 這個介面目前真正配到的位址，不是靠任何表單值或設定
-# 檔去猜——bootstrap-services 的表單裡原本就有一個 WireguardVMAddress
-# 欄位，但那個欄位目前唯一的用途只是 apply.sh 最後印給人看的那行網址
-# （純粹給人看，沒有任何程式邏輯依賴它），範例文字寫的是 /24 子網（跟
-# 「這台 VM 自己的位址」這個說法本身就不一致），直接拿來當這裡的目標
-# 位址不可靠。這支腳本本身就是透過 SSH 連進 wg0 執行的（preseed.cfg.j2
-# 把 sshd 的 ListenAddress 鎖定在這個介面的位址上），跑到這裡的這一刻
-# wg0 保證已經是 up 的狀態，直接問介面本身永遠是最新、最可靠的來源，也
-# 跟 caddy-proxy 實際綁定的介面位址天然一致（caddy-proxy 自己也是綁在
-# 這個位址上，見 caddy-proxy-install.yml）。
+# 目標位址直接查 wg-cluster 這個介面目前真正配到的位址，不是靠任何表單值
+# 或設定檔去猜——這支腳本本身就是透過 SSH 連進 wg-cluster 執行的
+# （preseed.cfg.j2 把 sshd 的 ListenAddress 鎖定在這個介面的位址上），跑到
+# 這裡的這一刻 wg-cluster 保證已經是 up 的狀態，直接問介面本身永遠是最新、
+# 最可靠的來源，也跟 caddy-proxy 實際綁定的介面位址天然一致（caddy-proxy
+# 自己也是綁在這個位址上，見 caddy-proxy-install.yml）。bootstrap-services
+# 的表單原本有一個 WireguardVMAddress 欄位讓使用者自己填，後來發現唯一
+# 用途只是 apply.sh 最後印給人看的那行網址，沒有任何程式邏輯依賴它，改成
+# 這裡同一套「直接查介面」的做法之後，那個欄位整題拿掉了（見 apply.sh
+# 自己的說明）。
 #
 # 用法：dns-apply.sh <hostname>
 
@@ -42,9 +42,9 @@ if [ "$#" -ne 1 ] || [ -z "$1" ]; then
 fi
 hostname="$1"
 
-wg0_address=$(ip -4 -o addr show dev wg0 | grep -oP 'inet \K[0-9.]+')
-if [ -z "$wg0_address" ]; then
-  echo "錯誤：查不到 wg0 介面目前的位址" >&2
+wg_cluster_address=$(ip -4 -o addr show dev wg-cluster | grep -oP 'inet \K[0-9.]+')
+if [ -z "$wg_cluster_address" ]; then
+  echo "錯誤：查不到 wg-cluster 介面目前的位址" >&2
   exit 1
 fi
 
@@ -53,6 +53,6 @@ fi
 # 本身一樣是一次性的。/^#/! 排除註解行，避免註解裡剛好出現這個 hostname
 # 字眼被誤判成舊的對應紀錄而整行被刪掉。
 sed -i "/^#/!{/[[:space:]]${hostname}\([[:space:]]\|\$\)/d}" /etc/hosts
-printf '%s\t%s\n' "$wg0_address" "$hostname" >>/etc/hosts
+printf '%s\t%s\n' "$wg_cluster_address" "$hostname" >>/etc/hosts
 
-echo "已把 ${hostname} 對應到 ${wg0_address}（寫進 /etc/hosts）" >&2
+echo "已把 ${hostname} 對應到 ${wg_cluster_address}（寫進 /etc/hosts）" >&2

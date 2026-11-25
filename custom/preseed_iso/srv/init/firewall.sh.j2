@@ -145,8 +145,8 @@ fi
 # allow` 開 DNS/443 的轉送例外，連帶的 DEFAULT_FORWARD_POLICY=DROP 問題
 # （最早撞到的那個問題，當時討論過不能整條 FORWARD chain 開 ACCEPT，範圍
 # 太大）也因此不再相關——host 自己收下這個封包就結束了，不會把它轉送到
-# 任何地方。squid.sh 執行的時間點晚於這三個 systemd unit（squid 跟著
-# 互動式的 bootstrap-services 表單跑，三個 unit 開機就自動跑完了），所以
+# 任何地方。squid.sh 執行的時間點晚於這四個 systemd unit（squid 跟著
+# 互動式的 bootstrap-services 表單跑，四個 unit 開機就自動跑完了），所以
 # 這條規則套用的當下，squid 還沒啟動也沒關係——ufw 規則本身跟 squid 服務
 # 有沒有在監聽是兩件獨立的事，規則先放著不影響。
 ufw allow from 10.90.0.0/24 to 10.90.0.1 port 3128 proto tcp

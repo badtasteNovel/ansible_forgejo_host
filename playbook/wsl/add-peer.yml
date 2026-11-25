@@ -153,6 +153,8 @@
         wireguard_agent_address: "{{ (wsl_peer_address_raw.content | b64decode).strip() }}"
         wireguard_peer_public_key: "{{ (wireguard_vm_public_key_raw.content | b64decode).strip() }}"
         wireguard_preshared_key: "{{ (wsl_peer_psk_raw.content | b64decode).strip() }}"
+        wireguard_vm_address: "{{ wireguard_cluster_vm_address }}"
+        wireguard_listen_port: "{{ wireguard_cluster_listen_port }}"
         wireguard_endpoint_ip: "{{ vm_endpoint_ip }}"
 
     - name: '如果隧道之前已經是 up 的狀態，先關掉，等一下用新設定重新接通（第一次執行時這步本來就會失敗，忽略即可）'
@@ -314,6 +316,8 @@
             wireguard_agent_address: "{{ (hostvars['localhost'].windows_peer_address_raw.content | b64decode).strip() }}"
             wireguard_peer_public_key: "{{ (hostvars['localhost'].wireguard_vm_public_key_raw.content | b64decode).strip() }}"
             wireguard_preshared_key: "{{ (hostvars['localhost'].windows_peer_psk_raw.content | b64decode).strip() }}"
+            wireguard_vm_address: "{{ hostvars['localhost'].wireguard_cluster_vm_address }}"
+            wireguard_listen_port: "{{ hostvars['localhost'].wireguard_cluster_listen_port }}"
             wireguard_endpoint_ip: "{{ vm_endpoint_ip }}"
 
         - name: ".conf 確定寫出成功，才正式把 {{ hostvars['localhost'].windows_peer_name }} 標記成已認領（見 claim_peer.yml 開頭說明：挑到跟標記分開兩步，避免中途失敗卻已經把這個 peer 用掉）"

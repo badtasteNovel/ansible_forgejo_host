@@ -45,13 +45,12 @@ import (
 // 兩件獨立的事）。
 
 type answers struct {
-	WireguardVMAddress string `json:"wireguard_vm_address"`
-	InstallHarbor      bool   `json:"install_harbor"`
-	HarborHostname     string `json:"harbor_hostname"`
-	HarborURL          string `json:"harbor_url"`
-	HarborIp           string `json:"harbor_ip"`
-	HarborUsername     string `json:"harbor_username"`
-	HarborPassword     string `json:"harbor_password"`
+	InstallHarbor  bool   `json:"install_harbor"`
+	HarborHostname string `json:"harbor_hostname"`
+	HarborURL      string `json:"harbor_url"`
+	HarborIp       string `json:"harbor_ip"`
+	HarborUsername string `json:"harbor_username"`
+	HarborPassword string `json:"harbor_password"`
 }
 
 func main() {
@@ -84,10 +83,6 @@ func main() {
 
 	form := huh.NewForm(
 		huh.NewGroup(
-			huh.NewInput().
-				Title("這台 VM 自己的 WireGuard 位址").
-				Description("用 sudo wg show 查，輸入範例：10.105.0.0/24").
-				Value(&ans.WireguardVMAddress),
 			huh.NewConfirm().
 				Title("要在本機安裝 Harbor 嗎？").
 				Value(&ans.InstallHarbor),
@@ -95,11 +90,6 @@ func main() {
 	)
 	if err := form.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "表單已取消或發生錯誤：%v\n", err)
-		os.Exit(1)
-	}
-
-	if strings.TrimSpace(ans.WireguardVMAddress) == "" {
-		fmt.Fprintln(os.Stderr, "錯誤：沒有填這台 VM 的 WireGuard 位址，不會做任何變更")
 		os.Exit(1)
 	}
 
@@ -131,8 +121,8 @@ func main() {
 			os.Exit(1)
 		}
 
-		// 把這個 hostname 對應進 /etc/hosts，指到 VM 自己 wg0 介面目前的
-		// 位址——交給獨立的 dns-apply.sh 做（見該腳本開頭的完整說明：為
+		// 把這個 hostname 對應進 /etc/hosts，指到 VM 自己 wg-cluster 介面
+		// 目前的位址——交給獨立的 dns-apply.sh 做（見該腳本開頭的完整說明：為
 		// 什麼要獨立成一支腳本、為什麼不直接寫在這裡），這支程式這裡只
 		// 負責呼叫它、把表單問到的 hostname 當參數傳過去。這個步驟要排
 		// 在呼叫 apply.sh 之前——apply.sh 的 harbor_finalize 要在 VM 本機
