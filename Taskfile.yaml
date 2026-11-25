@@ -7,6 +7,7 @@ includes:
   build: ./custom/scripts/tasks/go-task/build-vm.yaml
   windows: ./custom/scripts/tasks/go-task/windows.yaml
   network: ./custom/scripts/tasks/go-task/network.yaml
+  range: ./custom/scripts/tasks/go-task/range.yaml
 
 vars:
   # meta.json 是這個 repo 的部署設定，跟著 repo 一起 commit，仿照 lg-laravel 專案的

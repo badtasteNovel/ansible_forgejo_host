@@ -1,0 +1,52 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+# 本機 Vagrant/Hyper-V 靶場——消費 Packer（custom/range/packer/debian.pkr.hcl）
+# 封裝出來的 box，不會自己走 preseed 安裝（那一步只在 Packer 建 box 的時候
+# 跑一次，見該檔案開頭的說明），所以 `vagrant up`/`vagrant destroy` 可以
+# 很快，用來反覆測試「裝機完成之後」的東西（/srv/init 底下的腳本、
+# bootstrap-services、Harbor/caddy-proxy 安裝 playbook……）。
+#
+# 用法（第一次）：
+#   1. 跑 task range:build（WSL2 側）產出 is_dev ISO
+#   2. Windows 側：packer build -var "iso_path=<上一步印出來的路徑>" custom/range/packer/debian.pkr.hcl
+#   3. vagrant box add --name debian-range custom/range/output/debian-range.box
+#   4. vagrant up（這個目錄下）
+#
+# 這個檔案沒有在真實 Hyper-V 環境跑過驗證——跟專案裡其他地方的 .vmx/
+# vmkfstools 一樣的誠實註記。特別是 Hyper-V provider 的虛擬網路交換器
+# 選擇：Vagrant 內建的 Hyper-V provider 在找不到明確設定時，第一次
+# `vagrant up` 通常會互動詢問要接哪個 switch——建議選一個 External（橋接
+# 實體網卡）的，這樣 VM 才會拿到跟 lan_subnet（192.168.0.0/24，見
+# playbook/control-panel/debian.yml）同網段的 DHCP IP，才吃得到
+# firewall.sh.j2 is_dev 分支額外放行的那條 ufw 規則；接 NAT 性質的
+# Default Switch 也能開機，但 Vagrant 要怎麼連進去（要另外處理
+# port forwarding）不在這份範本的範圍內。
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "debian-range"
+  config.vm.box_check_update = false # 純本機 box，沒有遠端 metadata 可以查更新
+
+  config.vm.provider "hyperv" do |h|
+    h.vmname   = "debian-range"
+    h.cpus     = 2
+    h.memory   = 2048
+    h.linked_clone = true # 從 Packer 的 box 快照用差異磁碟開機，不整顆複製——這是 vagrant up/destroy 比 Packer 本身快的主要原因
+  end
+
+  # 這個專案一直都是用金鑰登入、密碼帳號整個鎖死（preseed.cfg.j2 的
+  # passwd/user-password-crypted "!"），這裡沿用控制節點已經生成好的
+  # charlie 金鑰，不用 Vagrant 預設的 insecure keypair——跟正式環境
+  # 用同一套身分，差異只在 is_dev 放寬了 ufw/sshd 的可達範圍，不是換了
+  # 一套登入機制。
+  config.ssh.username        = "charlie"
+  config.ssh.port            = 52222 # 跟 vm_ssh_port 預設值一致，見 debian.yml
+  config.ssh.private_key_path = "../generated/keys/ssh/charlie_ed25519"
+  config.ssh.insert_key      = false # 不要讓 Vagrant 嘗試幫你換一把新金鑰——這把是控制節點自己管理、跟正式環境共用的身分，不該被 Vagrant 偷偷改掉
+
+  # 不開預設的 /vagrant 同步資料夾——這個專案裝機時所有東西都已經透過
+  # late_command 烘焙進 ISO 了，不依賴 Vagrant 的檔案同步機制；Hyper-V
+  # provider 的同步資料夾支援本來就比 VirtualBox 弱（沒有 Guest Additions
+  # 概念），不用也省掉一個不確定因素。
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+end

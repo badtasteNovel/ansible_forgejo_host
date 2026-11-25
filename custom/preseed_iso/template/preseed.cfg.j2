@@ -113,7 +113,7 @@ d-i finish-install/reboot_in_progress note
 ### /target/srv/network/<segment>/ 得先存在）。
 d-i preseed/late_command string \
   mkdir -p /target/home/{{ vm_user }}/.ssh; \
-  echo 'from="{{ wireguard_cluster_peer_subnet }}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
+  echo 'from="{{ wireguard_cluster_peer_subnet }}{% if is_dev %},{{ lan_subnet }}{% endif %}",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ssh_public_key }}' > /target/home/{{ vm_user }}/.ssh/authorized_keys; \
   cp -r /cdrom/bootstrap /target/home/{{ vm_user }}/bootstrap; \
   chmod -R 700 /target/home/{{ vm_user }}/bootstrap; \
   chmod 700 /target/home/{{ vm_user }}/.ssh; \
@@ -166,12 +166,14 @@ d-i preseed/late_command string \
   echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/wg-basic.service; \
   in-target systemctl enable wg-basic.service; \
 {% endif %}
+{% if not is_dev %}
   sed -i '/^ListenAddress /d' /target/etc/ssh/sshd_config; \
   echo 'ListenAddress {{ wireguard_cluster_vm_address }}' >> /target/etc/ssh/sshd_config; \
   mkdir -p /target/etc/systemd/system/ssh.service.d; \
   echo '[Unit]' > /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
   echo 'After=wg-cluster.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
   echo 'Requires=wg-cluster.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
+{% endif %}
   echo 'fs.inotify.max_user_watches = 1048576' > /target/etc/sysctl.d/99-inotify.conf; \
   echo 'fs.inotify.max_user_instances = 8192' >> /target/etc/sysctl.d/99-inotify.conf; \
   sed -i '/^\(pool\|server\|makestep\) /s/^/# /' /target/etc/chrony/chrony.conf; \
@@ -183,7 +185,9 @@ d-i preseed/late_command string \
   in-target systemctl enable chrony; \
   cp -r /cdrom/srv/. /target/srv/; \
   chmod -R 700 /target/srv; \
-  chown {{ vm_user }}:{{ vm_user }} /target/srv/init/software-install.sh; \
+  in-target chown {{ vm_user }}:{{ vm_user }} /srv/init/software-install.sh; \
+  in-target chgrp {{ vm_user }} /srv/init; \
+  in-target chmod 710 /srv/init; \
   ln -s /etc/wireguard/cluster/wg-cluster.conf /target/srv/network/cluster/wg-cluster.conf; \
 {% if is_basic_host %}
   ln -s /etc/wireguard/basic/wg-basic.conf /target/srv/network/basic/wg-basic.conf; \
@@ -211,7 +215,8 @@ d-i preseed/late_command string \
   in-target systemctl enable firewall.service; \
   echo '[Unit]' > /target/etc/systemd/system/software-install.service; \
   echo 'ConditionPathExists=/srv/init/software-install.sh' >> /target/etc/systemd/system/software-install.service; \
-  echo 'After=network.target firewall.service' >> /target/etc/systemd/system/software-install.service; \
+  echo 'After=network.target network-online.target firewall.service' >> /target/etc/systemd/system/software-install.service; \
+  echo 'Wants=network-online.target' >> /target/etc/systemd/system/software-install.service; \
   echo 'Requires=firewall.service' >> /target/etc/systemd/system/software-install.service; \
   echo '[Service]' >> /target/etc/systemd/system/software-install.service; \
   echo 'Type=oneshot' >> /target/etc/systemd/system/software-install.service; \
@@ -238,6 +243,18 @@ d-i preseed/late_command string \
   echo '[Install]' >> /target/etc/systemd/system/finalizer.service; \
   echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/finalizer.service; \
   in-target systemctl enable finalizer.service; \
+{% if is_dev %}
+  echo '[Unit]' > /target/etc/systemd/system/dev-range-poweroff.service; \
+  echo 'Description=Packer/is_dev 專用——/srv/init 整條鏈跑完就自動關機，讓 communicator=none 的 Packer build 知道裝機已經完成，可以封裝成 Vagrant box' >> /target/etc/systemd/system/dev-range-poweroff.service; \
+  echo 'After=finalizer.service' >> /target/etc/systemd/system/dev-range-poweroff.service; \
+  echo 'Requires=finalizer.service' >> /target/etc/systemd/system/dev-range-poweroff.service; \
+  echo '[Service]' >> /target/etc/systemd/system/dev-range-poweroff.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/dev-range-poweroff.service; \
+  echo 'ExecStart=/sbin/poweroff' >> /target/etc/systemd/system/dev-range-poweroff.service; \
+  echo '[Install]' >> /target/etc/systemd/system/dev-range-poweroff.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/dev-range-poweroff.service; \
+  in-target systemctl enable dev-range-poweroff.service; \
+{% endif %}
   parted -s /dev/sdc mklabel gpt mkpart primary ext4 0% 100%; \
   partprobe /dev/sdc; \
   udevadm settle; \

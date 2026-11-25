@@ -1,0 +1,81 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3'
+
+# 本機 Vagrant/Hyper-V 靶場（見 custom/range/ 自己的說明）專用的 task
+# namespace，跟 build:debian 分開成獨立檔案——build:debian 跑完最後一步
+# 是 SSH 上傳到正式 hypervisor，靶場完全不該碰那一塊，硬塞進同一個 task
+# 裡用一堆 if 分流只會讓那支 task 變得更難讀。這裡只負責「產生
+# is_dev=true 的 ISO」這一步，到此為止——後面 Packer 把 ISO 封裝成
+# Vagrant box、Vagrant 開機測試，都是 Windows 側的事，跟這支 WSL2 Task
+# 之間用「ISO 檔案路徑」當交接點，不試圖用同一支程式跨平台呼叫 Hyper-V。
+
+tasks:
+  build:
+    desc: "建本機 Vagrant/Hyper-V 靶場用的 ISO（is_dev=true，只產生檔案，不碰任何 hypervisor）"
+    silent: true
+    cmds:
+      - |
+        set -euo pipefail
+        # 跟 build-vm.yaml 的 add-peer 同一個理由、同一個做法：這支 task
+        # 產出的 ISO 下一步一定要搬到 Windows 側跑 Packer，SSH 連不到本機
+        # Windows 的話，花時間把整個 preseed 安裝跑完也沒用——先擋下來，
+        # 不要等問完一輪表單、裝機跑完才在最後發現搬不過去。
+        if ! task windows:test; then
+          echo "錯誤：task windows:test 連不上本機 Windows，請先排查 SSH 連線問題（見 playbook/wsl/network.yml，或跑 task network:wsl 重新部署），再跑 task range:build" >&2
+          exit 1
+        fi
+
+        if [ ! -f custom/.env ]; then
+          echo "錯誤：找不到 custom/.env，先 cp custom/.env.example custom/.env 並填好真實值" >&2
+          exit 1
+        fi
+        set -a
+        source custom/.env
+        set +a
+
+        # HYPERVISOR_* 不需要（is_dev 的 playbook 分支完全不會用到），但
+        # HARBOR_ADMIN_PASSWORD/HARBOR_DB_PASSWORD 還是要——harbor.yml 不管
+        # is_dev 是不是 true 都無條件渲染進 ISO，跟 build:debian 檢查的理由
+        # 完全一樣（見 build-vm.yaml 同一段檢查）。
+        if [ -z "${HARBOR_ADMIN_PASSWORD:-}" ] || [ -z "${HARBOR_DB_PASSWORD:-}" ]; then
+          echo "錯誤：custom/.env 要先填好 HARBOR_ADMIN_PASSWORD / HARBOR_DB_PASSWORD（見 custom/.env.example）——harbor.yml 無條件渲染進 ISO，即使是 is_dev 的靶場也要填" >&2
+          exit 1
+        fi
+
+        filename=$(jq -r '.debian["iso-path"]' custom/iso/manifest.json)
+        iso_path="$(pwd)/custom/iso/$filename"
+        build_path=$(jq -r '.debian["build-path"]' custom/iso/manifest.json)
+        if [ ! -f "$iso_path" ]; then
+          echo "錯誤：找不到 $iso_path，請先把對應的 ISO 放進 custom/iso/" >&2
+          exit 1
+        fi
+
+        # 沿用 custom/scripts/vm-form/debian 同一支表單（vm_name/is_basic_host），
+        # 不另外寫一份——靶場跟正式環境問的是同一組問題，沒有理由分岔。
+        vm_form_result=$(go run -C custom/scripts/vm-form ./debian)
+        vm_name=$(jq -r '.vm_name' <<<"$vm_form_result")
+        if [ -z "$vm_name" ] || [ "$vm_name" = "null" ]; then
+          echo "錯誤：VM 名稱不能是空的" >&2
+          exit 1
+        fi
+        is_basic_host=$(jq -r '.is_basic_host' <<<"$vm_form_result")
+
+        preseed_iso_path="$(pwd)/custom/generated/iso/${vm_name}/${vm_name}-preseed.iso"
+        if [ -f "$preseed_iso_path" ]; then
+          if gum confirm "已經有打包好的 ISO（$preseed_iso_path），要重新封裝嗎？（選「否」就沿用現有的舊 ISO）"; then
+            rm -f "$preseed_iso_path"
+          fi
+        fi
+
+        # peer_slot_count 固定給 0——靶場的 SSH 本來就不鎖 WireGuard（見
+        # is_dev 的說明），不需要預先生成匿名 cluster peer 位置。
+        ansible-playbook "$build_path" \
+          --extra-vars "iso_path=${iso_path}" \
+          --extra-vars "peer_slot_count=0" \
+          --extra-vars "vm_name=${vm_name}" \
+          --extra-vars "is_basic_host=${is_basic_host}" \
+          --extra-vars "is_dev=true"
+
+        echo "" >&2
+        echo "靶場用 ISO 已經產好：${preseed_iso_path}" >&2
+        echo "接下來到 Windows 側，拿這個路徑跑 custom/range/packer/debian.pkr.hcl 封裝成 Vagrant box（見 custom/range/ 自己的說明）。" >&2

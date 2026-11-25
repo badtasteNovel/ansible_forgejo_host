@@ -135,6 +135,17 @@
     # ansible-playbook 測試（不透過 task build:debian、沒有表單）時不會
     # 噴 undefined 錯誤，真正的值永遠是表單問出來的。
     is_basic_host: false
+    # 給本機 Vagrant/Hyper-V 靶場用的旗標，不是給正式 build:debian 用的
+    # ——這個網路環境連不到 WireGuard（Windows host 不會額外加入
+    # wg-cluster 當 peer，否則就失去「本機快速迴圈」的意義），所以開著
+    # 這個旗標時，sshd 的 ListenAddress 鎖定／ssh.service 對
+    # wg-cluster.service 的依賴都跳過，authorized_keys 的 from= 限制跟
+    # firewall.sh.j2 的 ufw SSH 規則額外放行 lan_subnet（見 preseed.cfg.j2/
+    # firewall.sh.j2 各自的 is_dev 分支）。WireGuard 本身仍然無條件裝、
+    # 無條件啟用——這個旗標只放寬 SSH 的可達性，不是讓 WireGuard 變成
+    # 選用功能（見本檔案開頭「WireGuard 不是選用功能」的說明）。預設
+    # false，正式建置完全不受影響。
+    is_dev: false
     lan_subnet: "192.168.0.0/24" # 實體 LAN 網段（ESXi host、控制端本機都在這個網段，見 custom/.env.example 的 HYPERVISOR_HOSTNAME=192.168.1.10）——ufw 拿這個限制 WireGuard 監聽埠本身只接受內網來源的 handshake，不開放給整個網際網路
     peer_slot_count: 0 # 要新增幾個匿名的 cluster peer 位置，由 build:debian 的 gum input 透過 --extra-vars 決定——basic 沒有這種 build 時預先生成的機制，見上面的說明
 
@@ -187,16 +198,23 @@
           - vm_name is defined
           - vm_name | length > 0
           - iso_path is defined
+        fail_msg: >-
+          請確認透過 --extra-vars 傳入 vm_name（custom/scripts/vm-form/debian
+          問出來的值）跟 iso_path（task select-iso 的輸出路徑）——正常透過
+          task build:debian 跑就不用自己管這兩個，Taskfile 會自動帶
+
+    - name: '確認 hypervisor 連線資訊都有值——is_dev 的本機靶場不會跑到後面上傳 hypervisor 的那幾步，不需要這些值，所以跳過這個檢查'
+      ansible.builtin.assert:
+        that:
           - hypervisor_hostname | length > 0
           - hypervisor_username | length > 0
           - hypervisor_password | length > 0
           - hypervisor_datastore | length > 0
           - hypervisor_network | length > 0
         fail_msg: >-
-          請確認 custom/.env 已填好必要連線資訊，且透過 --extra-vars 傳入
-          vm_name（custom/scripts/vm-form/debian 問出來的值）跟 iso_path
-          （task select-iso 的輸出路徑）——正常透過 task build:debian 跑就
-          不用自己管這兩個，Taskfile 會自動帶
+          請確認 custom/.env 已填好必要連線資訊——正常透過 task build:debian
+          跑就不用自己管這個，Taskfile 會自動 source .env
+      when: not is_dev
 
     - name: '確保 custom/generated/keys/、custom/generated/preseed/、custom/generated/iso/ 目錄存在'
       ansible.builtin.file:
@@ -446,6 +464,7 @@
       environment:
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
+      when: not is_dev
 
     - name: '把重新封裝好的 ISO 上傳到 datastore'
       ansible.builtin.command:
@@ -456,6 +475,7 @@
       environment:
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
+      when: not is_dev
 
     - name: '把 .vmx 上傳到 datastore'
       ansible.builtin.command:
@@ -466,6 +486,7 @@
       environment:
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
+      when: not is_dev
 
     - name: '用 vmkfstools 建立系統碟'
       ansible.builtin.command:
@@ -476,6 +497,7 @@
       environment:
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
+      when: not is_dev
 
     - name: '用 vmkfstools 建立資料碟'
       ansible.builtin.command:
@@ -486,6 +508,7 @@
       environment:
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
+      when: not is_dev
 
     - name: '用 vmkfstools 建立 Harbor 專屬資料碟（無條件建立，見上面 vm_disk_harbor_gb 的說明）'
       ansible.builtin.command:
@@ -496,6 +519,7 @@
       environment:
         SSHPASS: "{{ hypervisor_password }}"
       changed_when: true
+      when: not is_dev
 
     - name: '印出後續手動步驟需要的資訊'
       ansible.builtin.debug:
@@ -506,6 +530,15 @@
           - "3. 開機、preseed 無人值守安裝跑完後，自己查一下 VM 的 LAN IP（唯一用途：等一下 task add-peer 要用）"
           - "4. 跑 task add-peer——把目前這台機器加進 WireGuard、接通隧道、順便把 known_hosts 跟 SSH 私鑰準備好（VM 的 LAN IP 就是這時候用）"
           - "5. 接通之後，SSH 連線固定走 WireGuard 位址 {{ wireguard_cluster_vm_address }}，不是 VM 的 LAN IP——連線細節看 task add-peer 跑完印出的提示"
+      when: not is_dev
+
+    - name: '印出 is_dev 本機靶場後續手動步驟需要的資訊——沒有 hypervisor 上傳這幾步，直接把封裝好的 ISO 交給 Packer'
+      ansible.builtin.debug:
+        msg:
+          - "is_dev=true，ISO 已經封裝好，沒有上傳到任何 hypervisor（也不需要手動 Register VM/Power On——Packer 自己會建 Hyper-V VM 開機）："
+          - "  {{ preseed_output_iso }}"
+          - "接下來在 Windows 側跑 Packer，用這個路徑當 iso_url，封裝成 Vagrant box；之後開機不會把 charlie 的 SSH 鎖在 WireGuard 位址，sshd/ufw 都額外放行 {{ lan_subnet }}，一般 SSH 連線即可（見 custom/range/ 自己的說明）。"
+      when: is_dev
 
     - name: '印出 bootstrap-services 的後續資訊'
       ansible.builtin.debug:
