@@ -183,6 +183,7 @@ d-i preseed/late_command string \
   in-target systemctl enable chrony; \
   cp -r /cdrom/srv/. /target/srv/; \
   chmod -R 700 /target/srv; \
+  chown {{ vm_user }}:{{ vm_user }} /target/srv/init/software-install.sh; \
   ln -s /etc/wireguard/cluster/wg-cluster.conf /target/srv/network/cluster/wg-cluster.conf; \
 {% if is_basic_host %}
   ln -s /etc/wireguard/basic/wg-basic.conf /target/srv/network/basic/wg-basic.conf; \
