@@ -28,13 +28,26 @@ set -euo pipefail
 # checksum 都寫死釘住（撰寫這份檔案時查 GitHub release 當下的最新穩定版、
 # 實際下載驗證過），不是動態抓「最新版」——理由跟這個專案其他地方釘死
 # 版本一樣：可重現、不會因為上游發新版而悄悄改變行為。
+#
+# 兩個 curl 都帶 --retry 10 --retry-delay 3 --retry-all-errors——實機撞過
+# 開機當下這支 service 真正跑起來的那一瞬間，DNS 還沒準備好（curl: (6)
+# Could not resolve host），systemd unit 已經加了 Wants=/After=
+# network-online.target（見 preseed.cfg.j2），但這台機器的網路是
+# dhcpcd（不是 ifupdown/NetworkManager/systemd-networkd），沒有確認
+# dhcpcd 的 systemd 整合有正確掛上 network-online.target——加了那個
+# ordering 之後問題照樣重現，等於完全沒被等到。改成讓 curl 自己重試，
+# 不管底層用哪種網路管理工具都有效，不用去猜/依賴哪個 systemd target
+# 有沒有正確接線。--retry-all-errors 是必要的：curl 預設 --retry 只在
+# 特定 HTTP 5xx/408/429 這類「暫時性」錯誤才重試，DNS 解析失敗
+# （CURLE_COULDNT_RESOLVE_HOST）不在預設清單裡，不加這個旗標遇到這個
+# 錯誤還是會直接放棄，retry 次數再多都沒用。
 
 STAGE_DIR="$1"
 
 if ! command -v task >/dev/null 2>&1; then
   echo "==> 裝 task（go-task v3.54.0）..."
   task_tarball="$STAGE_DIR/task_linux_amd64.tar.gz"
-  curl -fsSL -o "$task_tarball" \
+  curl -fsSL --retry 10 --retry-delay 3 --retry-all-errors -o "$task_tarball" \
     https://github.com/go-task/task/releases/download/v3.54.0/task_linux_amd64.tar.gz
   echo "680859dbb4d881a9c72d4d9a8f510825450849af8567deacd7302c01124416fb  $task_tarball" | sha256sum -c -
   tar -xzf "$task_tarball" -C "$STAGE_DIR" task
@@ -43,7 +56,7 @@ fi
 if ! command -v gum >/dev/null 2>&1; then
   echo "==> 裝 gum（v2.0.2）..."
   gum_tarball="$STAGE_DIR/gum_2.0.2_Linux_x86_64.tar.gz"
-  curl -fsSL -o "$gum_tarball" \
+  curl -fsSL --retry 10 --retry-delay 3 --retry-all-errors -o "$gum_tarball" \
     https://github.com/charmbracelet/gum/releases/download/v2.0.2/gum_2.0.2_Linux_x86_64.tar.gz
   echo "d842e06d93dbed90af48cb8dd10698db6f22e331fc40346bb37bbc753109edc2  $gum_tarball" | sha256sum -c -
   tar -xzf "$gum_tarball" -C "$STAGE_DIR" gum_2.0.2_Linux_x86_64/gum

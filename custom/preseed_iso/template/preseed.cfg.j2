@@ -87,9 +87,22 @@ d-i base-installer/kernel/image string linux-image-amd64
 ### caddy-proxy-install.yml），這些常駐服務是直接在 VM 主機本身、不透過
 ### ansible-navigator 的 EE 容器跑，所以主機這邊也要有這個套件，不能只
 ### 裝在 Containerfile 裡（EE 容器只在裝機後 bootstrap-services 跑設置
-### playbook 時用得到，常駐服務的生命週期比它長得多）。
+### playbook 時用得到，常駐服務的生命週期比它長得多）；network-manager
+### 取代 d-i netcfg 預設寫出來的 ifupdown/dhcpcd 這組網路管理——實機撞過
+### dhcpcd 的 systemd 整合沒有確實掛上 network-online.target，開機瞬間
+### software-install.service 真的連跑在它前面過，NetworkManager 自帶的
+### NetworkManager-wait-online.service 是標準、經過大量驗證的做法；另一個
+### 理由是 Ansible 對 NetworkManager 的支援（community.general.nmcli）比
+### 直接動 dhcpcd/ifupdown 設定檔成熟，以後要用 Ansible 管網路設定會更
+### 好做。late_command 裡會把 /etc/network/interfaces 清成只留
+### loopback、加一個 NetworkManager.conf.d 覆寫讓它接管所有裝置、停用
+### dhcpcd.service，見該區塊自己的說明。WireGuard 的 wg-cluster/wg-basic
+### 兩個介面完全不受影響——它們是 wg-quick 自己的 systemd unit 直接建立
+### 的 kernel 介面，不是 NetworkManager 認得的連線類型，預設就不會被它
+### 碰。這整套改動還沒在真實硬體上驗證過，跟這份文件其他地方的 .vmx/
+### vmkfstools 一樣誠實標註，第一次跑完請回報結果。
 tasksel tasksel/first multiselect standard
-d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible pipx jq curl squid-openssl vim uidmap
+d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible pipx jq curl squid-openssl vim uidmap network-manager
 d-i pkgsel/upgrade select none
 popularity-contest popularity-contest/participate boolean false
 
@@ -166,6 +179,14 @@ d-i preseed/late_command string \
   echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/wg-basic.service; \
   in-target systemctl enable wg-basic.service; \
 {% endif %}
+  echo '# interfaces(5) file used by ifup(8) and ifdown(8)' > /target/etc/network/interfaces; \
+  echo 'auto lo' >> /target/etc/network/interfaces; \
+  echo 'iface lo inet loopback' >> /target/etc/network/interfaces; \
+  mkdir -p /target/etc/NetworkManager/conf.d; \
+  echo '[ifupdown]' > /target/etc/NetworkManager/conf.d/10-globally-managed-devices.conf; \
+  echo 'managed=true' >> /target/etc/NetworkManager/conf.d/10-globally-managed-devices.conf; \
+  in-target systemctl disable dhcpcd.service; \
+  in-target systemctl enable NetworkManager.service; \
 {% if not is_dev %}
   sed -i '/^ListenAddress /d' /target/etc/ssh/sshd_config; \
   echo 'ListenAddress {{ wireguard_cluster_vm_address }}' >> /target/etc/ssh/sshd_config; \
