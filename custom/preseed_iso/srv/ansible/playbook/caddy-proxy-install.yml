@@ -49,11 +49,11 @@
 # 每個 site 設定的 reverse_proxy 目標要指向這個 10.0.2.2，不是 127.0.0.1
 # （127.0.0.1 在這個獨立 network namespace 裡只會指向 caddy-proxy 容器
 # 自己）。對外監聽改用兩個 -p 明確發布（caddy-proxy 現在同時綁在兩個
-# 獨立的 WireGuard interface 上——cluster 跟 infrastructure，見 debian.yml
-# 兩套 WireGuard 身分的說明；目前只有 Harbor 需要透過 infrastructure 被
+# 獨立的 WireGuard interface 上——cluster 跟 basic，見 debian.yml
+# 兩套 WireGuard 身分的說明；目前只有 Harbor 需要透過 basic 被
 # 多個 cluster 共用，其他服務維持走 cluster）：
 #   {{ wireguard_cluster_vm_address }}:{{ caddy_proxy_internal_port }}
-#   {{ wireguard_infrastructure_vm_address }}:{{ caddy_proxy_internal_port }}
+#   {{ wireguard_basic_vm_address }}:{{ caddy_proxy_internal_port }}
 # {{ caddy_proxy_internal_port }} 是高位埠，不是 client 端實際連的 443——
 # 443 不碰、也不用放寬任何 sysctl，見下面「特權埠」那段跟 firewall.sh.j2
 # 自己的說明，不再靠 --network=host 隱含共用主機介面——這也讓每個 site
@@ -141,8 +141,8 @@
           ExecStart=/usr/bin/podman run -d --name caddy-proxy \
             --network slirp4netns:allow_host_loopback=true \
             -p {{ wireguard_cluster_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
-{% if is_infrastructure_host %}
-            -p {{ wireguard_infrastructure_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
+{% if is_basic_host %}
+            -p {{ wireguard_basic_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
 {% endif %}
             -v {{ caddy_proxy_home }}/Caddyfile:/etc/caddy/Caddyfile:z,ro \
             -v {{ caddy_proxy_sites_dir }}:/etc/caddy/sites.d:z,ro \

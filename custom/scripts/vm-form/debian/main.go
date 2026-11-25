@@ -18,7 +18,7 @@ import (
 // 不再是 build 這個當下的決定，所以這支表單不再問、也不再輸出 install_harbor。
 func main() {
 	var vmName string
-	var isInfrastructureHost bool
+	var isBasicHost bool
 
 	form := huh.NewForm(
 		huh.NewGroup(
@@ -30,13 +30,13 @@ func main() {
 			// 前面加一個固定的 "> " 文字游標，不管顏色顯不顯示都看得到，
 			// 同一個問題用 Select 不會發生。
 			huh.NewSelect[bool]().
-				Title("這台 VM 要成為 infrastructure 網段（10.104.0.0/24）的 host 嗎？").
+				Title("這台 VM 要成為 basic 網段（10.104.0.0/24）的 host 嗎？").
 				Description("是否要把這台 VM 設成 10.104.0.1/32 的 WireGuard 位址").
 				Options(
 					huh.NewOption("Yes", true),
 					huh.NewOption("No", false),
 				).
-				Value(&isInfrastructureHost),
+				Value(&isBasicHost),
 		),
 	)
 
@@ -46,8 +46,8 @@ func main() {
 	}
 
 	answers := map[string]any{
-		"vm_name":                vmName,
-		"is_infrastructure_host": isInfrastructureHost,
+		"vm_name":       vmName,
+		"is_basic_host": isBasicHost,
 	}
 
 	out, err := json.Marshal(answers)

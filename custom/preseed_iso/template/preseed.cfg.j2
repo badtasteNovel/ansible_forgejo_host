@@ -100,7 +100,7 @@ d-i grub-installer/bootdev string default
 ### Finishing installation
 d-i finish-install/reboot_in_progress note
 
-### wg-cluster.conf／wg-infrastructure.conf 的「真正」檔案留在
+### wg-cluster.conf／wg-basic.conf 的「真正」檔案留在
 ### /etc/wireguard/<segment>/（wg-quick/systemd unit 認的就是這個路徑，
 ### 不能搬走），但在 /srv/network/<segment>/wg-*.conf 這裡額外建一個
 ### symbolic link 指過去——/srv/network/<segment>/ 底下的 show.sh/
@@ -137,8 +137,8 @@ d-i preseed/late_command string \
   chown root:root /target/etc/ssh/ssh_host_ed25519_key /target/etc/ssh/ssh_host_ed25519_key.pub; \
   mkdir -p /target/etc/wireguard; \
   cp -r /cdrom/wireguard/cluster /target/etc/wireguard/cluster; \
-{% if is_infrastructure_host %}
-  cp -r /cdrom/wireguard/infrastructure /target/etc/wireguard/infrastructure; \
+{% if is_basic_host %}
+  cp -r /cdrom/wireguard/basic /target/etc/wireguard/basic; \
 {% endif %}
   chmod -R 700 /target/etc/wireguard; \
   chown -R root:root /target/etc/wireguard; \
@@ -153,18 +153,18 @@ d-i preseed/late_command string \
   echo '[Install]' >> /target/etc/systemd/system/wg-cluster.service; \
   echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/wg-cluster.service; \
   in-target systemctl enable wg-cluster.service; \
-{% if is_infrastructure_host %}
-  echo '[Unit]' > /target/etc/systemd/system/wg-infrastructure.service; \
-  echo 'Description=WireGuard (infrastructure, 10.104.0.0/24 -- shared infra reachable across multiple clusters, e.g. Harbor)' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  echo 'After=network.target' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  echo '[Service]' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  echo 'Type=oneshot' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  echo 'ExecStart=/usr/bin/wg-quick up /etc/wireguard/infrastructure/wg-infrastructure.conf' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  echo 'ExecStop=/usr/bin/wg-quick down /etc/wireguard/infrastructure/wg-infrastructure.conf' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  echo '[Install]' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/wg-infrastructure.service; \
-  in-target systemctl enable wg-infrastructure.service; \
+{% if is_basic_host %}
+  echo '[Unit]' > /target/etc/systemd/system/wg-basic.service; \
+  echo 'Description=WireGuard (basic, 10.104.0.0/24 -- shared infra reachable across multiple clusters, e.g. Harbor)' >> /target/etc/systemd/system/wg-basic.service; \
+  echo 'After=network.target' >> /target/etc/systemd/system/wg-basic.service; \
+  echo '[Service]' >> /target/etc/systemd/system/wg-basic.service; \
+  echo 'Type=oneshot' >> /target/etc/systemd/system/wg-basic.service; \
+  echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/wg-basic.service; \
+  echo 'ExecStart=/usr/bin/wg-quick up /etc/wireguard/basic/wg-basic.conf' >> /target/etc/systemd/system/wg-basic.service; \
+  echo 'ExecStop=/usr/bin/wg-quick down /etc/wireguard/basic/wg-basic.conf' >> /target/etc/systemd/system/wg-basic.service; \
+  echo '[Install]' >> /target/etc/systemd/system/wg-basic.service; \
+  echo 'WantedBy=multi-user.target' >> /target/etc/systemd/system/wg-basic.service; \
+  in-target systemctl enable wg-basic.service; \
 {% endif %}
   sed -i '/^ListenAddress /d' /target/etc/ssh/sshd_config; \
   echo 'ListenAddress {{ wireguard_cluster_vm_address }}' >> /target/etc/ssh/sshd_config; \
@@ -184,8 +184,8 @@ d-i preseed/late_command string \
   cp -r /cdrom/srv/. /target/srv/; \
   chmod -R 700 /target/srv; \
   ln -s /etc/wireguard/cluster/wg-cluster.conf /target/srv/network/cluster/wg-cluster.conf; \
-{% if is_infrastructure_host %}
-  ln -s /etc/wireguard/infrastructure/wg-infrastructure.conf /target/srv/network/infrastructure/wg-infrastructure.conf; \
+{% if is_basic_host %}
+  ln -s /etc/wireguard/basic/wg-basic.conf /target/srv/network/basic/wg-basic.conf; \
 {% endif %}
   echo '[Unit]' > /target/etc/systemd/system/podman-network.service; \
   echo 'ConditionPathExists=/srv/init/podman-network.sh' >> /target/etc/systemd/system/podman-network.service; \

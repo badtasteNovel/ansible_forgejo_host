@@ -11,7 +11,7 @@ set -euo pipefail
 # 互不取代的路徑（見 playbook/control-panel/debian.yml 裡「兩套獨立的
 # WireGuard 身分」那段說明）：那套是「build 時先批次生成一批匿名 peer
 # slot，事後認領」，設計給管理面存取用，數量/身分在 build 時就該決定好；
-# 這支是「現場產生、現場印出來」，原本只有 infrastructure 需要（沒有
+# 這支是「現場產生、現場印出來」，原本只有 basic 需要（沒有
 # 對應的 build-time 機制），但這支腳本本身對 cluster 一樣適用，當一條
 # 額外的手動路徑——兩套機制並存，這支不會動到既有的 peer slot 系統，也
 # 不會跟它搶 IP（見下面 IP 分配邏輯的說明）。

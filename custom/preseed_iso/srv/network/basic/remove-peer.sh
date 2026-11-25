@@ -1,9 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# 從 wg-infrastructure 的 .conf 裡刪掉一整個 [Peer] 區段——跟
+# 從 wg-basic 的 .conf 裡刪掉一整個 [Peer] 區段——跟
 # /srv/network/cluster/remove-peer.sh 同一個道理，見該檔案的完整說明，
-# 這裡只是換成 infrastructure 自己的 .conf/interface。要移除哪一個
+# 這裡只是換成 basic 自己的 .conf/interface。要移除哪一個
 # peer，用 gum choose 讓使用者互動選，邏輯放在這支腳本裡、不是放在
 # Taskfile（Taskfile 的 gum choose 只負責選網段）。
 #
@@ -18,7 +18,7 @@ fi
 # 絕對路徑——道理跟 /srv/network/cluster/remove-peer.sh 一樣，見該檔案
 # 的說明。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONF_PATH="$SCRIPT_DIR/wg-infrastructure.conf"
+CONF_PATH="$SCRIPT_DIR/wg-basic.conf"
 
 peer_names=$(grep -oP '^# \K.+' "$CONF_PATH" || true)
 if [ -z "$peer_names" ]; then
@@ -36,6 +36,6 @@ tmp="$(mktemp)"
 awk -v marker="$marker" 'BEGIN{RS=""; ORS="\n\n"} index($0, marker) == 0' "$CONF_PATH" >"$tmp"
 mv "$tmp" "$CONF_PATH"
 
-wg syncconf wg-infrastructure <(wg-quick strip "$CONF_PATH")
+wg syncconf wg-basic <(wg-quick strip "$CONF_PATH")
 
-echo "已移除 ${peer_name}，已經即時套用到 wg-infrastructure，不需要重啟隧道。" >&2
+echo "已移除 ${peer_name}，已經即時套用到 wg-basic，不需要重啟隧道。" >&2

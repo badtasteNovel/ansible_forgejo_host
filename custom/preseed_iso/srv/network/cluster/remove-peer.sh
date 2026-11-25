@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # 要移除哪一個 peer，用 gum choose 讓使用者自己互動選——這段選擇邏輯
 # 刻意放在這支腳本裡，不是放在 ~/scripts/wireguard/ 的 Taskfile：
-# Taskfile 的 gum choose 只負責「選網段（cluster 還是 infrastructure）」
+# Taskfile 的 gum choose 只負責「選網段（cluster 還是 basic）」
 # 這一題，選好網段之後的事全部交給對應網段自己的 add-peer.sh/
 # remove-peer.sh 處理，Taskfile 不需要知道 .conf 的格式、也不用重複寫
 # 一次解析 peer 名稱的邏輯。

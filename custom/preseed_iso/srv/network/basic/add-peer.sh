@@ -1,15 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-# 在 wg-infrastructure 現有的 .conf 裡現場新增一個 [Peer] 區段，立刻套用到
+# 在 wg-basic 現有的 .conf 裡現場新增一個 [Peer] 區段，立刻套用到
 # 正在跑的 interface（不用重啟隧道、不影響既有連線），然後印出對應的
 # client 端設定給使用者直接複製貼上。
 #
 # 這是全新寫的機制，沒有實機跑過，用之前自己先核對一次輸出的內容。
 #
-# infrastructure 沒有對應的 build-time Ansible 自動化（跟 cluster 不
+# basic 沒有對應的 build-time Ansible 自動化（跟 cluster 不
 # 一樣，見 playbook/control-panel/debian.yml 裡「兩套獨立的 WireGuard
-# 身分」那段說明）——這支是 infrastructure 目前唯一的 peer 認領路徑：
+# 身分」那段說明）——這支是 basic 目前唯一的 peer 認領路徑：
 # 其他 k3s cluster 的節點要共用這台 VM 上的 Harbor，就是透過這支腳本
 # 現場產生一個 peer。
 
@@ -22,8 +22,8 @@ fi
 # 絕對路徑——跟 /srv/network/cluster/add-peer.sh 同一個道理，見該檔案的
 # 說明。.key 沒有這層連結，PRIVATE_KEY_FILE 還是直接寫絕對路徑。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONF_PATH="$SCRIPT_DIR/wg-infrastructure.conf"
-PRIVATE_KEY_FILE=/etc/wireguard/infrastructure/wg-infrastructure.key
+CONF_PATH="$SCRIPT_DIR/wg-basic.conf"
+PRIVATE_KEY_FILE=/etc/wireguard/basic/wg-basic.key
 SUBNET_PREFIX=10.104.0
 LISTEN_PORT=51821
 
@@ -31,7 +31,7 @@ LISTEN_PORT=51821
 # 主機會用哪個來源位址」當猜測值——這是這台主機自己對外看起來的位址，
 # 不保證就是其他機器真正連得到的那個（同一個位址在 NAT 後面、對外部來說
 # 可能完全不通），只是個合理的起點，印出來的結果務必自己核對一次，不要
-# 不看就直接拿去用——infrastructure 的 peer 通常是另一個 cluster 的節點，
+# 不看就直接拿去用——basic 的 peer 通常是另一個 cluster 的節點，
 # 更需要確認這個位址真的是對方連得到的（不是同一個實體 LAN 的話，額外
 # 要注意路由/NAT 有沒有擋）。
 if [ "$#" -ge 1 ]; then
@@ -47,7 +47,7 @@ fi
 
 # 從現有 .conf 裡所有 AllowedIPs = x.x.x.x/32 這種單一位址，抓出已經用掉
 # 的最後一個八位元，取最大值 +1 當新 peer 的位址——.1 保留給 VM 自己
-# （wg-infrastructure.conf 自己的 Address 那一行），起始值是 2。
+# （wg-basic.conf 自己的 Address 那一行），起始值是 2。
 last_octet=$(grep -oP "AllowedIPs = ${SUBNET_PREFIX}\.\K\d+(?=/32)" "$CONF_PATH" | sort -n | tail -1 || true)
 if [ -z "$last_octet" ]; then
   next_octet=2
@@ -80,11 +80,11 @@ peer_name="peer-$(date +%Y%m%d%H%M%S)"
 # wg syncconf 把新設定套用到正在跑的 interface，不用 down/up 整條隧道
 # （現有連線不會被中斷）——wg-quick strip 把 .conf 轉成 wg setconf 格式
 # 吃得懂的樣子（去掉 wg-quick 自己才認得的 Address/PostUp 這類欄位）。
-wg syncconf wg-infrastructure <(wg-quick strip "$CONF_PATH")
+wg syncconf wg-basic <(wg-quick strip "$CONF_PATH")
 
-echo "已新增 ${peer_name}（${peer_address}），已經即時套用到 wg-infrastructure，不需要重啟隧道。" >&2
+echo "已新增 ${peer_name}（${peer_address}），已經即時套用到 wg-basic，不需要重啟隧道。" >&2
 echo "" >&2
-echo "=== 把下面這段貼到新 peer 自己的 wg-infrastructure.conf ===" >&2
+echo "=== 把下面這段貼到新 peer 自己的 wg-basic.conf ===" >&2
 # client 端的 AllowedIPs 只填 VM 自己的單一位址（/32），不是整個 /24 子網
 # ——跟 cluster 那支 add-peer.sh 同一個理由：這個 peer 只需要連到 VM 本身
 # （摸到 caddy-proxy），不需要也不該把整個子網的流量都導過來。

@@ -1,10 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# 顯示 wg-infrastructure 自己的公鑰——跟 /srv/network/cluster/show.sh 同一個
-# 道理，見該檔案的完整說明，這裡只是換成 infrastructure 自己的私鑰檔案。
+# 顯示 wg-basic 自己的公鑰——跟 /srv/network/cluster/show.sh 同一個
+# 道理，見該檔案的完整說明，這裡只是換成 basic 自己的私鑰檔案。
 
-PRIVATE_KEY_FILE=/etc/wireguard/infrastructure/wg-infrastructure.key
+PRIVATE_KEY_FILE=/etc/wireguard/basic/wg-basic.key
 
 public_key=$(sudo cat "$PRIVATE_KEY_FILE" | wg pubkey)
 
