@@ -110,6 +110,7 @@
 
     - name: 'pull Caddy image'
       ansible.builtin.command: podman pull {{ caddy_proxy_image }}
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ caddy_proxy_user }}"
       environment: "{{ rootless_podman_env }}"
@@ -155,6 +156,7 @@
 
     - name: 'systemctl --user daemon-reload + enable + start caddy-proxy.service'
       ansible.builtin.command: "{{ item }}"
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ caddy_proxy_user }}"
       environment: "{{ rootless_podman_env }}"

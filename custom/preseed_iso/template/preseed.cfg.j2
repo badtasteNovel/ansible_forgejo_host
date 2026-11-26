@@ -113,6 +113,55 @@ d-i grub-installer/bootdev string default
 ### Finishing installation
 d-i finish-install/reboot_in_progress note
 
+### harbor/caddy-proxy 這兩個 rootless 系統使用者（useradd + subuid/
+### subgid）搬到這裡建，不是留給 harbor-install.yml/caddy-proxy-install.yml
+### 共用的 rootless_podman_user_setup.yml 現場用 ansible.builtin.user 建
+### ——原本那個做法需要把整個 /etc 掛進 ansible-navigator 的 EE 容器
+### 才能寫 /etc/passwd/subuid/subgid，這兩個帳號名稱是 control-panel/
+### debian.yml 寫死的常數（harbor_user/caddy_proxy_user），不是哪次表單
+### 才決定的值，build 時就能確定，沒有理由非要等到 playbook 執行期才建，
+### 跟這個專案一貫「能在 build 時決定的東西全部無條件烘焙進 preseed」
+### 的做法一致（Harbor 的磁碟/CA 憑證也是同一個邏輯）。搬到這裡之後，
+### ansible-navigator.yml 的 volume-mounts 不用再整個掛 /etc，只需要
+### 掛 update-ca-certificates 要用的 /etc/ssl（見該檔案自己的說明）。
+### 用一支暫存腳本（不是直接 in-target bash -c '...'）：useradd/awk 這段
+### 邏輯本身要用到雙引號（awk 的 -F: 參數要跟 bash 的 "$u" 共存），如果
+### 直接包在 late_command 自己的單引號字串裡會變成三層引號互相打架，
+### 寫成一支真正的 .sh 檔案、每一行各自用 echo 追加，跟這份檔案其他地方
+### 組 systemd unit 內容的做法完全一致，不用煩惱引號巢狀的問題。
+### subuid/subgid 用「現有最大值 +1」動態算，不寫死範圍：這是全新灌好
+### 的系統，/etc/subuid 理論上一開始是空的，但不假設這件事一定成立
+### （以後哪個套件的 postinst 可能也會配一個區段），跟 Ansible 原本那套
+### 邏輯（rootless_podman_user_setup.yml 曾經用過的做法）算法一致，只是
+### 換成兩個帳號依序各跑一次，第二個帳號跑的時候讀到的 /etc/subuid 已經
+### 包含第一個帳號剛補上去的那一段，不會互相覆蓋。
+###
+### ansible-runner 這個帳號，是 harbor-install.yml/caddy-proxy-install.yml
+### 裡那些直接呼叫 podman（podman load/run/pull/podman-compose up、
+### systemctl --user）的 task，以後要改走「SSH 回這台 VM 自己的
+### 127.0.0.1」這個路徑時要用的身分——不是現在就改，這一輪只先把整套
+### 連線機制（帳號、金鑰、sudo 規則）建好，playbook 裡實際的 task 還沒
+### 改。這個帳號本身完全是 rootless、沒有任何 root 權限，sudoers 規則
+### 刻意限定目標：`ansible-runner ALL=(%podman-svc) NOPASSWD: ALL` 只
+### 允許切換成 podman-svc 這個群組裡的帳號（harbor、caddy-proxy，見上面
+### 迴圈裡的 usermod -aG），不是 `(ALL)`——即使這把金鑰被濫用，頂多也只能
+### 做到跟現在 become_user: harbor/caddy-proxy 一模一樣的事，碰不到真正
+### 的 root。用群組不是列名單（ALL=(harbor,caddy-proxy)），是為了以後
+### 隨便哪個新服務要用一樣的機制，只要把那個帳號加進 podman-svc 群組
+### 就好，不用回來改這條 sudoers 規則本身。
+###
+### 私鑰放在 /srv/podman/keys/ansible_runner_ed25519（root-only，0600），
+### 不是用 podman secret 之類的機制在 build 時就處理——那是 run_navigator()
+### 在每次真正呼叫 ansible-navigator 前後動態 create/rm 的事（見 config.sh
+### 自己的說明），build 時只需要把私鑰材料放到那個固定路徑、公鑰寫進
+### ansible-runner 自己的 authorized_keys 就夠了。authorized_keys 用
+### from="127.0.0.1" 限制——這把金鑰的用途就是「VM 對自己的 loopback
+### 連線」，從任何其他來源打過來都不該被接受，跟 charlie 自己的
+### authorized_keys 用 wireguard_cluster_peer_subnet 限制是同一個道理。
+### sshd 額外加一條 ListenAddress 127.0.0.1，跟原本鎖定 WireGuard 位址的
+### 那條並存——127.0.0.1 天生就只有本機才連得到，不會因此開放任何新的
+### 遠端攻擊面，跟「SSH 只能走 WireGuard」這條既有規則要擋的「遠端」
+### 存取完全是兩件不衝突的事。
 ### wg-cluster.conf／wg-basic.conf 的「真正」檔案留在
 ### /etc/wireguard/<segment>/（wg-quick/systemd unit 認的就是這個路徑，
 ### 不能搬走），但在 /srv/network/<segment>/wg-*.conf 這裡額外建一個
@@ -187,9 +236,35 @@ d-i preseed/late_command string \
   echo 'managed=true' >> /target/etc/NetworkManager/conf.d/10-globally-managed-devices.conf; \
   in-target systemctl disable dhcpcd.service; \
   in-target systemctl enable NetworkManager.service; \
+  echo '#!/bin/bash' > /target/root/setup-rootless-users.sh; \
+  echo 'set -euo pipefail' >> /target/root/setup-rootless-users.sh; \
+  echo 'groupadd podman-svc' >> /target/root/setup-rootless-users.sh; \
+  echo 'for u in {{ harbor_user }} {{ caddy_proxy_user }}; do' >> /target/root/setup-rootless-users.sh; \
+  echo '  useradd --system --shell /usr/sbin/nologin --create-home --password "*" "$u"' >> /target/root/setup-rootless-users.sh; \
+  echo '  usermod -aG podman-svc "$u"' >> /target/root/setup-rootless-users.sh; \
+  echo '  NEXT=$(awk -F: "BEGIN{m=100000}{e=\$2+\$3; if(e>m)m=e}END{print m}" /etc/subuid)' >> /target/root/setup-rootless-users.sh; \
+  echo '  usermod --add-subuids "${NEXT}-$((NEXT+65535))" --add-subgids "${NEXT}-$((NEXT+65535))" "$u"' >> /target/root/setup-rootless-users.sh; \
+  echo 'done' >> /target/root/setup-rootless-users.sh; \
+  echo 'useradd --system --shell /bin/bash --create-home --password "*" ansible-runner' >> /target/root/setup-rootless-users.sh; \
+  in-target bash /root/setup-rootless-users.sh; \
+  rm -f /target/root/setup-rootless-users.sh; \
+  echo 'ansible-runner ALL=(%podman-svc) NOPASSWD: ALL' > /target/etc/sudoers.d/ansible-runner; \
+  chmod 440 /target/etc/sudoers.d/ansible-runner; \
+  mkdir -p /target/home/ansible-runner/.ssh; \
+  echo 'from="127.0.0.1",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ansible_runner_public_key }}' > /target/home/ansible-runner/.ssh/authorized_keys; \
+  chmod 700 /target/home/ansible-runner/.ssh; \
+  chmod 600 /target/home/ansible-runner/.ssh/authorized_keys; \
+  in-target chown -R ansible-runner:ansible-runner /home/ansible-runner/.ssh; \
+  mkdir -p /target/srv/podman/keys; \
+  cp /cdrom/ansible_runner_key /target/srv/podman/keys/ansible_runner_ed25519; \
+  chmod 700 /target/srv/podman; \
+  chmod 700 /target/srv/podman/keys; \
+  chmod 600 /target/srv/podman/keys/ansible_runner_ed25519; \
+  chown -R root:root /target/srv/podman; \
 {% if not is_dev %}
   sed -i '/^ListenAddress /d' /target/etc/ssh/sshd_config; \
   echo 'ListenAddress {{ wireguard_cluster_vm_address }}' >> /target/etc/ssh/sshd_config; \
+  echo 'ListenAddress 127.0.0.1' >> /target/etc/ssh/sshd_config; \
   mkdir -p /target/etc/systemd/system/ssh.service.d; \
   echo '[Unit]' > /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
   echo 'After=wg-cluster.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
@@ -282,6 +357,10 @@ d-i preseed/late_command string \
   mkfs.ext4 -F /dev/sdc1; \
   mkdir -p /target{{ vm_harbor_mount_path }}; \
   echo "UUID=$(blkid -s UUID -o value /dev/sdc1) {{ vm_harbor_mount_path }} ext4 defaults,nofail 0 2" >> /target/etc/fstab; \
+  mount /dev/sdc1 /target{{ vm_harbor_mount_path }}; \
+  in-target chown {{ harbor_user }}:{{ harbor_user }} {{ vm_harbor_mount_path }}; \
+  chmod 0751 /target{{ vm_harbor_mount_path }}; \
+  umount /target{{ vm_harbor_mount_path }}; \
   parted -s /dev/sdb mklabel gpt mkpart primary ext4 0% 100%; \
   partprobe /dev/sdb; \
   udevadm settle; \

@@ -103,8 +103,64 @@ ensure_ee_image() {
 # 自動從目前工作目錄找 ansible-navigator.yml——呼叫這個函式的腳本有可能從
 # 任何目錄被呼叫，不應該依賴呼叫當下的 cwd 剛好是 EE_DIR。-m stdout 再帶
 # 一次，跟設定檔裡的 mode: stdout 重複沒關係，只是多一層保險。
+#
+# -i /srv/ansible/inventory/ansible_runner.ini：讓 harbor-install.yml/
+# caddy-proxy-install.yml 裡那些 become_user: harbor/caddy-proxy 的 task
+# 可以用 delegate_to: ansible_runner_host 真的 SSH 回這台 VM 自己的
+# 127.0.0.1 執行（見該 inventory 檔案自己的說明），不是繼續在容器內
+# 直接執行、靠 bind mount 碰 host 狀態。原本沒有帶 -i，隱含用的是
+# implicit localhost——這個 inventory 檔案只多定義一個額外的 host
+# （ansible_runner_host），不影響其他沒用 delegate_to 的 task 原本
+# 連 localhost 執行的行為，兩者並存。
+#
+# 這支函式本身故意不帶 </dev/null——那樣會讓以後任何呼叫端都自動套用
+# 同一個行為，萬一哪天新增一個真的需要讀 stdin 的呼叫方式，會被這裡
+# 波及卻很難想到要回來查這支共用函式。改成在每個呼叫點各自決定要不要
+# 加 </dev/null（見 bootstrap/services/caddy.sh、harbor.sh、
+# srv/harbor/rotate/update.sh 各自呼叫 run_navigator 那一行的說明）。
+# 每次呼叫前先建一個 podman secret，把 /srv/podman/keys/ansible_runner_ed25519
+# 這把私鑰餵進 EE 容器（見 ansible-navigator.yml 的 --secret 設定），呼叫
+# 結束（不管成功還是失敗）都把這個 secret 刪掉——這把私鑰只在 playbook
+# 真正執行的這段時間內，對容器來說是「存在」的，執行完就從容器可觸及的
+# 範圍裡完全消失，不會變成一個長期留著的憑證。secret 本身只是私鑰內容的
+# 一個暫時性容器內包裝，不是私鑰材料本身——/srv/podman/keys/ 底下那份
+# 檔案是永久的（preseed 裝機時就放好了），每次呼叫只是重新把它包成一個
+# secret 再拆掉，不會重新生成金鑰。
+#
+# 先嘗試刪除同名舊 secret（2>/dev/null || true 吞掉「本來就不存在」的
+# 錯誤）：如果上一次呼叫中途被中斷（例如整支腳本被 kill），secret 可能
+# 沒有被正常清掉，直接 create 會因為同名已存在而失敗，先清一次確保
+# 這次一定是乾淨的。
+#
+# 用 && rc=0 || rc=$? 接住 ansible-navigator 的 exit code，不是切換
+# set +e/set -e——同一件事兩種寫法都考慮過，這個不需要手動開關 -e，
+# 少一個「忘記轉回來」的風險：&&/|| 串接的指令本身不會觸發 set -e
+# （只看整條複合指令最終的結果），這支函式的呼叫端全部都開了
+# set -euo pipefail，如果直接讓 ansible-navigator 失敗觸發 set -e，
+# 會直接中止整支函式，下面清掉 secret 的那一行永遠不會執行到。
+#
+# 這只處理「指令回傳非 0」這一種失敗，另外用 trap ... EXIT 補上「整支
+# 腳本被訊號直接砍掉」（例如執行到一半按 Ctrl+C、或 SSH session 斷線）
+# 這一種——這種情況不是指令回傳值的問題，是行程本身被終止，set -e
+# 完全管不到。EXIT 這個 trap 在 bash 裡不只在正常 return 時觸發，收到
+# INT/TERM/HUP 這類可攔截的訊號導致行程終止時一樣會執行到，不需要
+# 分別針對這幾個訊號各寫一次。唯一攔不到的是 SIGKILL（-9）——這是
+# 作業系統層級的保證，任何行程、任何寫法都無法攔截，不是這支函式的
+# 限制。trap 設定之後、函式正常結束前用 `trap - EXIT` 把它清掉，不讓
+# 它一路留到呼叫端後續的程式碼還在生效（雖然留著也無害——podman
+# secret rm 對一個已經不存在的 secret 是安全的 no-op，頂多清兩次）。
 run_navigator() {
-  ANSIBLE_NAVIGATOR_CONFIG="$EE_DIR/ansible-navigator.yml" ansible-navigator run "$1" -m stdout "${@:2}"
+  podman secret rm ansible_runner_ssh_key >/dev/null 2>&1 || true
+  podman secret create ansible_runner_ssh_key /srv/podman/keys/ansible_runner_ed25519 >/dev/null
+  trap 'podman secret rm ansible_runner_ssh_key >/dev/null 2>&1 || true' EXIT
+
+  local rc=0
+  ANSIBLE_NAVIGATOR_CONFIG="$EE_DIR/ansible-navigator.yml" ansible-navigator run "$1" -m stdout \
+    -i /srv/ansible/inventory/ansible_runner.ini "${@:2}" && rc=0 || rc=$?
+
+  trap - EXIT
+  podman secret rm ansible_runner_ssh_key >/dev/null 2>&1 || true
+  return "$rc"
 }
 
 PROXY_MAP_PATH=/srv/harbor/proxy_map.json

@@ -154,6 +154,12 @@
     wireguard_peers_dir: "{{ wireguard_keys_base_dir }}/wireguard_peers" # 每個 peer 一個子目錄，見 custom/scripts/tasks/ansible/wireguard_keys/generate_one_peer_slot.yml、claim_peer.yml
     ssh_key_path: "{{ keys_dir }}/ssh/{{ vm_user }}_ed25519" # VM 上 charlie 登入用的 client 金鑰
     ssh_host_key_path: "{{ keys_dir }}/known-hosts/{{ vm_name }}/ed_25519" # VM 自己的 host key——放在 known-hosts/ 底下，因為這把金鑰的用途就是 known_hosts 驗證
+    # VM 自己 SSH 回自己 127.0.0.1 用的金鑰——ansible-navigator 的 EE 容器
+    # 透過 podman secret 拿到私鑰，連回 host 的 ansible-runner 帳號（再用
+    # sudo 切到 harbor/caddy-proxy），不是給任何外部機器用的，跟
+    # ssh_key_path（charlie，給人登入用）/ssh_host_key_path（VM 的身分，
+    # 給外部 known_hosts 驗證用）兩個完全不同用途，所以另開一把，不要混用
+    ansible_runner_key_path: "{{ keys_dir }}/ssh/ansible_runner_ed25519"
     hypervisor_known_hosts_path: "{{ keys_dir }}/known-hosts/hypervisor_known_hosts"
     # 沒有 known_hosts_path 這個變數——這支 playbook 只負責產生原始金鑰材料，
     # 不組「可以直接拿來連線用」的 known_hosts 檔案，那是 SSH client 端的設定，
@@ -254,6 +260,24 @@
       loop:
         - { src: "{{ ssh_host_key_path }}", dest: ssh_host_key, mode: "0600" }
         - { src: "{{ ssh_host_key_path }}.pub", dest: ssh_host_key.pub, mode: "0644" }
+
+    - name: '產生 ansible-runner 的 SSH 金鑰對（VM 連回自己 127.0.0.1 用，若已存在則不重建）'
+      community.crypto.openssh_keypair:
+        path: "{{ ansible_runner_key_path }}"
+        type: ed25519
+        comment: "ansible-runner@{{ vm_name }}"
+
+    - name: '讀取 ansible-runner 公鑰內容（要寫進它自己的 authorized_keys）'
+      ansible.builtin.slurp:
+        src: "{{ ansible_runner_key_path }}.pub"
+      register: ansible_runner_public_key_raw
+
+    - name: '把 ansible-runner 的私鑰複製進 ISO 注入資料夾——公鑰內容直接用變數塞進 late_command 的 authorized_keys 那一行，不需要另外複製 .pub 檔案進去'
+      ansible.builtin.copy:
+        src: "{{ ansible_runner_key_path }}"
+        dest: "{{ preseed_output_dir }}/ansible_runner_key"
+        remote_src: true
+        mode: "0600"
 
     - name: '確保 VM 自己的 cluster WireGuard 金鑰已經產生（只有 VM 自己的身分，跟 peer 金鑰完全分開）'
       ansible.builtin.include_tasks:
@@ -437,6 +461,7 @@
       vars:
         vm_hostname: "{{ vm_name }}"
         ssh_public_key: "{{ (ssh_public_key_raw.content | b64decode).strip() }}"
+        ansible_runner_public_key: "{{ (ansible_runner_public_key_raw.content | b64decode).strip() }}"
         ssh_port: "{{ vm_ssh_port }}"
 
     - name: '重新封裝 ISO，塞入 preseed.cfg、host key 並改開機參數'

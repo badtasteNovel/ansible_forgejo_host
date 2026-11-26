@@ -15,6 +15,13 @@
 # docker-compose.yml，podman-compose up -d 重建容器——offline installer
 # tarball 裡面只有 harbor.yml.tmpl（範本），不是 harbor.yml 本身，所以
 # unarchive 不會覆蓋掉已經在用的 harbor.yml。
+#
+# 跟 harbor-install.yml/caddy-proxy-install.yml 一樣，真正呼叫 podman
+# （podman load/run、podman-compose up）的 task 都帶 delegate_to:
+# ansible_runner_host，透過 SSH 連回這台 VM 自己的 127.0.0.1（ansible-runner
+# 帳號，再 become 到 harbor）執行，不是在 EE 容器裡直接執行——這份檔案
+# 當初跟著整個 SSH-runner 設計一起改的，見 rootless_podman_user_setup.yml
+# 開頭的完整說明。
 
 - name: '把這台 VM 上的 Harbor 升級到指定版本'
   hosts: localhost
@@ -25,7 +32,7 @@
     harbor_user: harbor
     harbor_home: /srv/harbor
     vm_harbor_mount_path: /var/lib/harbor
-    harbor_installer_cache: /var/cache/harbor-installer
+    harbor_installer_cache: /srv/harbor-installer-cache # 跟 harbor-install.yml 同一個理由（見該檔案的說明）——改放 /srv 底下，不用為此在 ansible-navigator.yml 多掛 /var/cache
     harbor_tgz_name: "harbor-offline-installer-{{ harbor_version }}.tgz"
     harbor_tgz_cached_path: "{{ harbor_installer_cache }}/{{ harbor_tgz_name }}"
     harbor_internal_http_port: "{{ (lookup('file', '/srv/harbor/harbor.yml') | from_yaml).http.port }}"
@@ -43,13 +50,23 @@
         database: passwd
         key: "{{ harbor_user }}"
 
+    # 跟 rootless_podman_user_setup.yml 同一個理由（見該檔案的說明）——
+    # 不掛整個 /etc/containers 進 EE 容器只為了讀一個檔案，改由 update.sh
+    # 在 host 上讀出內容、base64 編碼後用 --extra-vars 傳進來。
+    - name: "把呼叫端傳進來的 mirror-auth 內容寫進容器自己的暫存路徑，純讀取用，不需要掛載 /etc/containers"
+      ansible.builtin.copy:
+        content: "{{ mirror_auth_content_b64 | default('') | b64decode }}"
+        dest: /tmp/mirror-auth.json
+        mode: "0644"
+      when: (mirror_auth_content_b64 | default('')) | length > 0
+
     - name: '組 rootless 執行環境變數'
       ansible.builtin.set_fact:
         rootless_podman_env:
           XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts.getent_passwd[harbor_user][1] }}"
           DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ ansible_facts.getent_passwd[harbor_user][1] }}/bus"
           HOME: "/home/{{ harbor_user }}"
-          REGISTRY_AUTH_FILE: /etc/containers/mirror-auth.json
+          REGISTRY_AUTH_FILE: /tmp/mirror-auth.json
 
     # ────────────────────────── 下載／校驗新版 offline installer ──────────────────────────
 
@@ -92,6 +109,7 @@
 
     - name: 'podman load 新版 image bundle（進 harbor 使用者的 image store）'
       ansible.builtin.command: podman load -i {{ harbor_home }}/harbor.{{ harbor_version }}.tar.gz
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
@@ -108,6 +126,7 @@
         -v {{ harbor_home }}/common/config:/config:z
         -v /:/hostfs
         goharbor/prepare:{{ harbor_version }} prepare --with-trivy
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
@@ -121,6 +140,7 @@
           | .services[].logging = {"driver": "journald"}
           | .services.proxy.ports = ["127.0.0.1:{{ harbor_internal_http_port }}:8080"]
         ' {{ harbor_home }}/docker-compose.yml
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
@@ -128,6 +148,7 @@
 
     - name: 'podman-compose up -d（會重建 image 換了的容器，其他服務不動）'
       ansible.builtin.command: podman-compose -f {{ harbor_home }}/docker-compose.yml up -d
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"

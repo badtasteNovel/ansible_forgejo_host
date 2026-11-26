@@ -43,7 +43,7 @@
   vars:
     caddy_proxy_https_port: 443 # 整台 VM 唯一對外開放的埠，寫死常數——跟 control-panel/debian.yml、config.sh 裡的同名值待遇一樣，從來不是每台 VM 不一樣的東西，不需要透過 harbor_runtime_vars.yml 渲染進來，這裡只拿來組最後印出來的那行 URL。這是給 client 端看的值
     caddy_proxy_internal_port: 8443 # caddy-proxy 容器自己實際監聽的埠，渲染 harbor.caddy 的 site 設定要用這個值，不是 caddy_proxy_https_port——見 caddy-proxy-install.yml/firewall.sh.j2 自己的說明，443→8443 的轉換是 root 身份的 nat REDIRECT 做掉的
-    harbor_installer_cache: /var/cache/harbor-installer
+    harbor_installer_cache: /srv/harbor-installer-cache # 原本放 /var/cache/harbor-installer——改放 /srv 底下純粹是為了讓 ansible-navigator.yml 不用整個掛 /var/cache 進 EE 容器（這個快取目錄本身的下載/解壓/chown 都還是直接在容器裡做，沒有 delegate_to，容器仍然要看得到這個路徑；/srv 本來就整個掛進來，不需要為了這一個目錄再多開一條掛載）
     harbor_tgz_name: "harbor-offline-installer-{{ harbor_version }}.tgz"
     harbor_tgz_cached_path: "{{ harbor_installer_cache }}/{{ harbor_tgz_name }}"
     # proxy project <-> 上游對照：project 名稱、Harbor registry endpoint 名稱、
@@ -72,9 +72,16 @@
         file: /srv/ansible/playbook/rootless_podman_user_setup.yml # 原始檔是 custom/preseed_iso/srv/ansible/playbook/rootless_podman_user_setup.yml，跟著整棵 srv/ 樹裝機前由 control-panel/debian.yml 複製進 ISO——跟 caddy-proxy-install.yml 共用同一份
       vars:
         rootless_user_name: "{{ harbor_user }}"
+        # {{ vm_harbor_mount_path }}（/var/lib/harbor）故意不在這個清單裡——
+        # 這個目錄是裝機時 late_command 自己 mkfs.ext4/mount/chown/umount 一次
+        # 搞定擁有者（preseed.cfg.j2 最後那段），不是 late_command 當下就把
+        # 內容複製進去（像 harbor_home 那樣），而是等真正 mount 上去之後直接
+        # 對那顆磁碟本身的根目錄 chown，所以不需要、也不應該再讓這支 task
+        # 事後重新 chown 一次——這樣 ansible-navigator.yml 才不用為了這一個
+        # 路徑把 /var/lib/harbor 掛進 EE 容器（容器裡沒有任何 task 會再碰
+        # 這個路徑）。
         rootless_service_dirs:
           - "{{ harbor_home }}"
-          - "{{ vm_harbor_mount_path }}"
           - "{{ harbor_installer_cache }}"
 
     # ────────────────────────── 渲染 harbor.yml/harbor.caddy ──────────────────────────
@@ -159,6 +166,7 @@
 
     - name: 'podman load image bundle（進 harbor 使用者的 image store）'
       ansible.builtin.command: podman load -i {{ harbor_home }}/harbor.{{ harbor_version }}.tar.gz
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
@@ -183,6 +191,7 @@
         -v {{ harbor_home }}/common/config:/config:z
         -v /:/hostfs
         goharbor/prepare:{{ harbor_version }} prepare --with-trivy
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
@@ -202,6 +211,7 @@
           | .services[].logging = {"driver": "journald"}
           | .services.proxy.ports = ["127.0.0.1:{{ harbor_internal_http_port }}:8080"]
         ' {{ harbor_home }}/docker-compose.yml
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
@@ -209,6 +219,7 @@
 
     - name: 'podman-compose up -d'
       ansible.builtin.command: podman-compose -f {{ harbor_home }}/docker-compose.yml up -d
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"
@@ -254,6 +265,7 @@
 
     - name: 'systemctl --user daemon-reload + enable harbor.service'
       ansible.builtin.command: "{{ item }}"
+      delegate_to: ansible_runner_host
       become: true
       become_user: "{{ harbor_user }}"
       environment: "{{ rootless_podman_env }}"

@@ -7,12 +7,24 @@
 # 這個互動程式用子行程方式呼叫，輸出要直接灌進同一個終端機，不需要、也不能
 # 跳出 ansible-navigator 自己的全螢幕介面。
 #
-# execution-environment 的 volume-mounts 把 VM 主機的 /etc、/run、/var/lib、
-# /var/cache、/usr/local/share/ca-certificates 原封不動掛進容器同一個
-# 路徑——這兩支 playbook 要做 useradd、寫 systemd unit、改 /etc/subuid、
-# 操作 rootless podman 的儲存層，這些都是會動到 VM 主機真實狀態的操作，
-# 不是容器自己關起門來的事。--privileged --pid=host 讓容器裡的 systemctl
-# 真的能透過掛進來的 /run/systemd socket 跟 VM 主機的 systemd 講話。
+# execution-environment 的 volume-mounts 把 VM 主機幾條特定路徑原封不動
+# 掛進容器同一個路徑——不是整個 /etc、/var/lib、/var/cache 都掛，那是
+# 這個檔案更早期的版本。真正會動到 podman/systemd 儲存層狀態的操作
+# （podman load/run/pull、podman-compose up、systemctl --user、
+# useradd/改 /etc/subuid）現在全部透過 delegate_to: ansible_runner_host
+# SSH 回這台 VM 自己的 127.0.0.1、以真正的 host 行程執行，不再靠這個
+# 容器的 bind mount 去碰 host 狀態（見 rootless_podman_user_setup.yml
+# 開頭的完整說明）——這裡剩下的掛載，都是「EE 容器裡還留著的那幾個沒有
+# delegate_to 的純檔案操作」各自需要看到的最小路徑，不是舊設計的殘留。
+# --pid=host 讓容器裡的 loginctl enable-linger（這個 task 沒有
+# delegate_to，見下方說明）真的能透過掛進來的 /run/systemd socket 跟
+# VM 主機的 systemd-logind 講話。
+#
+# 原本這裡還有 --privileged——拿掉了。當初加這個是防禦性的「全部開」，
+# 不是算出剛好夠用的 capability 清單：容器本來就已經用 --user=0 跑、
+# /etc 等敏感目錄也已經明確 bind mount 進來，useradd/改 /etc/subuid 這類
+# 操作本質上只需要檔案層級的 root 權限，不需要 --privileged 額外給的那些
+# 東西（停用 seccomp/AppArmor、開放裝置存取、給所有 Linux capability）。
 # 這塊設定沒有實機驗證過，見 config.sh 的 ensure_ee_image() 開頭的說明
 # （EE image 現在是手寫 Containerfile、直接用 debian:13-slim 當 base，
 # 不是透過 ansible-builder 產生）。
@@ -26,10 +38,11 @@
 # --user=0：明確指定這個容器用 root（UID 0）身份跑，不要讓它吃 image 自己
 # 的預設使用者（我們自己的 Containerfile 沒有寫 USER，預設就是 root，但
 # 明確寫出來比依賴這個隱性預設更保險——以後如果 Containerfile 加了 USER
-# 指令，這裡不會悄悄跟著變。--privileged 本身已經給這個容器完整的 Linux
-# capabilities，不需要真的是 UID 0 也能做 useradd 之類的操作，但
-# become/sudo 這種會查「呼叫者是誰」的場景需要名義上的 UID 真的是 0，
-# sudo 對 root 才有跳過密碼驗證的內建邏輯）。
+# 指令，這裡不會悄悄跟著變）。拿掉 --privileged 之後這一行只會更重要，
+# 不是更不重要——沒有 --privileged 那種「全部開」的 capability 兜底，
+# useradd/改 /etc/subuid 這類操作要能成功，純粹只能靠容器裡的行程名義上
+# 真的是 UID 0，直接吃檔案層級的 root 權限；become/sudo 這種會查「呼叫者
+# 是誰」的場景也一樣，sudo 對 root 才有跳過密碼驗證的內建邏輯。
 #
 # 故意不掛 /opt：這兩支 playbook 完全沒有任何地方碰 /opt（這個專案本來就
 # 刻意不用 /opt 放自己的東西，一律改放 /srv/<name>，見 CLAUDE.md）。
@@ -51,7 +64,6 @@ ansible-navigator:
     pull:
       policy: missing
     container-options:
-      - "--privileged"
       - "--pid=host"
       - "--network=host"
       - "--user=0"
@@ -79,9 +91,60 @@ ansible-navigator:
       # 這裡的需求）。
       - "-v"
       - "/run:/run:rw,rslave"
+      # --interactive=false：蓋掉 ansible-runner 自己組 podman run 指令時
+      # 無條件加上去的 --interactive（原始碼在 ansible_runner/config/
+      # _base.py 的 wrap_args_for_containerization，`new_args.append(
+      # '--interactive')` 沒有任何 if 包著，ansible-navigator.yml 的
+      # mode: stdout 管不到這一層）。實機撞過：這個容器帶 -i 卻沒有真正
+      # 的 tty（沒有 --tty，只有沒設 input_fd 時才會加），podman run -i
+      # 的 attach 迴圈在 ansible-playbook 本身已經跑完之後還是卡著不放，
+      # 整條呼叫鏈（apply.sh → caddy.sh/harbor.sh → run_navigator）因此
+      # 卡住不動，SSH 進去用 ps 追 process tree 才抓到。
+      #
+      # 蓋得掉的原因：podman 是用 Go 的 Cobra/pflag 寫的，布林旗標重複
+      # 出現時「最後一次生效」；上面同一個 wrap_args_for_containerization
+      # 把 self.container_options（也就是這整份清單）接在 new_args 的最
+      # 尾端、緊接在 image 名稱之前，排在 ansible-runner 自己那個寫死的
+      # --interactive 後面——直接讀過這台 VM 實際裝的
+      # /opt/pipx/venvs/ansible-navigator/lib/python3.13/site-packages/
+      # ansible_runner/config/_base.py 確認過兩者的行號順序，不是只憑
+      # GitHub 上可能對不上版本的原始碼推測。
+      #
+      # 沒有改用 </dev/null 餵給 run_navigator 的呼叫端：那個做法已經在
+      # bootstrap/services/caddy.sh、harbor.sh、srv/harbor/rotate/
+      # update.sh 這三個呼叫點實際裝過、驗證過，這裡改用這個方案之後
+      # 就拿掉了——兩個方案本質上都是在處理同一個「容器根本不需要互動
+      # 輸入，卻被迫帶 -i」的問題，選這個是因為能直接在設定檔這一層把
+      # 問題關掉，不用每個呼叫點各自記得加。
+      - "--interactive=false"
+      # 這把私鑰讓容器裡的 playbook SSH 回這台 VM 自己的 127.0.0.1
+      # （ansible-runner 帳號，再 sudo 切到 harbor/caddy-proxy，見
+      # preseed.cfg.j2 late_command 裡 ansible-runner 那段的完整說明）。
+      # secret 本身的 create/rm 由 config.sh 的 run_navigator() 在每次
+      # 呼叫前後動態處理，這裡只宣告容器要怎麼吃到它——target 刻意放
+      # /tmp（容器自己的 overlay 層，不是 volume-mounts 掛進來的任何
+      # 路徑），這把私鑰只在容器執行期間存在，不需要、也不該落在任何跟
+      # host 共用的掛載點上。
+      - "--secret=ansible_runner_ssh_key,target=/tmp/id_ed25519,mode=0400"
     volume-mounts:
-      - src: /etc
-        dest: /etc
+      # 原本整個 /etc 都掛進來（useradd/改 /etc/subuid 要用）——那些操作
+      # 現在搬到 preseed.cfg.j2 的 late_command 去了（帳號是 build 時就
+      # 知道的固定名稱，不用等這支 playbook 執行期才建），EE 容器裡現在
+      # 唯一還會直接寫 /etc 底下東西的，只剩 caddy-proxy-install.yml
+      # 的 update-ca-certificates（寫 /etc/ssl/certs 底下的憑證 bundle
+      # ca-certificates.crt + hash-named symlink）——這個操作需要真正的
+      # root，ansible-runner 的 sudo 範圍只到 %podman-svc（harbor/
+      # caddy-proxy），連不上去，不能 delegate_to，只能留在容器裡用
+      # --user=0 做。只掛 /etc/ssl/certs 這一個子目錄，不是整個
+      # /etc/ssl——update-ca-certificates 實際只動這裡，/etc/ssl 底下
+      # 其他東西（openssl.cnf、private/、ct_log_list.cnf）它完全不碰，
+      # 沒必要一起掛進來。/etc/ca-certificates.conf 也刻意不掛——不掛
+      # 的話它只會吃到容器自己 image 裡的預設版本，但這支指令本來就是
+      # 整批從 /usr/share/ca-certificates + /usr/local/share/ca-certificates
+      # （這兩個都另外掛了）重新產生 /etc/ssl/certs/ca-certificates.crt，
+      # 不是增量累加，容器自己那份 conf 內容對結果沒有影響。
+      - src: /etc/ssl/certs
+        dest: /etc/ssl/certs
         options: rw
       - src: /home/harbor
         dest: /home/harbor
@@ -92,24 +155,49 @@ ansible-navigator:
       # harbor_home（/srv/harbor）、caddy_proxy_home（/srv/caddy）都在這裡
       # 底下——late_command 裝機當下已經把 harbor.yml/憑證/vhost conf 這些
       # 東西直接放進最終位置了（見 control-panel/debian.yml），harbor-install.yml/
-      # caddy-proxy-install.yml 要讀寫這些檔案。整個 /srv 掛進來，不是隻掛
-      # /srv/harbor、/srv/caddy 兩條——/srv/ansible（這份 playbook 自己的
-      # 位置）本來就靠 ansible-navigator 自動掛 playbook 所在目錄才摸得到，
-      # 跟這裡的 volume-mounts 設定無關，但 /srv/harbor、/srv/caddy 是跟
-      # playbook 不同層的獨立子目錄，不會被那個自動行為一起帶到，必須自己
-      # 明確掛——實機撞過 harbor-install.yml 收緊 harbor.yml 權限那個 task
-      # 直接噴 "file (/srv/harbor/harbor.yml) is absent, cannot continue"，
-      # 但同一個檔案在主機本身是存在的，純粹因為容器完全沒掛 /srv 這個
-      # 目錄，根本看不到。
-      - src: /srv
-        dest: /srv
+      # caddy-proxy-install.yml 要讀寫這些檔案。/srv/ansible（這份 playbook
+      # 自己的位置）本來就靠 ansible-navigator 自動掛 playbook 所在目錄才
+      # 摸得到，跟這裡的 volume-mounts 設定無關，但 /srv/harbor、/srv/caddy
+      # 是跟 playbook 不同層的獨立子目錄，不會被那個自動行為一起帶到，必須
+      # 自己明確掛——實機撞過 harbor-install.yml 收緊 harbor.yml 權限那個
+      # task 直接噴 "file (/srv/harbor/harbor.yml) is absent, cannot
+      # continue"，但同一個檔案在主機本身是存在的，純粹因為容器完全沒掛
+      # 這個目錄，根本看不到。harbor_installer_cache（下載/解壓 offline
+      # installer tgz 用的快取目錄）也特意選在 /srv 底下（/srv/harbor-
+      # installer-cache），所以這裡也明確列一條。
+      #
+      # 故意不掛整個 /srv，只掛這三個子目錄——/srv 底下還有
+      # /srv/podman/keys/ansible_runner_ed25519（ansible-runner 用來 SSH
+      # 回這台 VM 自己的那把私鑰本體，見 preseed.cfg.j2 late_command 的
+      # 說明），如果整個 /srv 掛進來，這把私鑰會跟著一起出現在容器裡，
+      # 完全繞過上面特地用 podman secret 動態 create/rm、只餵進容器自己
+      # 的 /tmp 這整套設計——容器是 --user=0 跑、沒有 --cap-drop，UID 0
+      # 對 DAC 權限檢查本來就是豁免的，`/srv/podman/keys` 底下那個檔案的
+      # 0600 root:root 擋不住容器裡的 root 直接讀，掛載層面本身必須先
+      # 不讓這個路徑進容器可見範圍，不能靠檔案權限補救。只明確列
+      # /srv/harbor、/srv/caddy、/srv/harbor-installer-cache 這三條，以後
+      # /srv 底下再多開新的子目錄（像 /srv/network、/srv/init），預設都
+      # 不會自動進到這個容器裡，要用就要自己明確加一條。
+      - src: /srv/harbor
+        dest: /srv/harbor
         options: rw
-      - src: /var/lib
-        dest: /var/lib
+      - src: /srv/caddy
+        dest: /srv/caddy
         options: rw
-      - src: /var/cache
-        dest: /var/cache
+      - src: /srv/harbor-installer-cache
+        dest: /srv/harbor-installer-cache
         options: rw
+      # 原本這裡還有 /var/lib/harbor（vm_harbor_mount_path，Harbor 的持久
+      # 資料卷，FHS 慣例路徑，不是放在 /srv 底下的東西）——現在整條拿掉了。
+      # 這個路徑原本要掛進來，純粹是因為 rootless_podman_user_setup.yml
+      # 的服務目錄清單裡有它，裡面那些沒有 delegate_to 的 chown/o+x task
+      # 要碰得到它；改成讓 preseed.cfg.j2 的 late_command 在裝機當下自己
+      # mount /dev/sdc1、chown {{ harbor_user }}、chmod 0751、再 umount
+      # 一次性把擁有者設好（harbor-install.yml 的 rootless_service_dirs
+      # 清單也同步拿掉這一條），EE 容器裡現在沒有任何 task 會再碰這個
+      # 路徑，不需要掛載。goharbor/prepare 那個巢狀 podman run（要掛這個
+      # 路徑進去當 /data）本來就已經整個 delegate_to: ansible_runner_host
+      # 在真正的 host 上執行，從頭到尾都不需要容器自己看到這個路徑。
       - src: /usr/local/share/ca-certificates
         dest: /usr/local/share/ca-certificates
         options: rw
