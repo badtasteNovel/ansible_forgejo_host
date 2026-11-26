@@ -102,7 +102,19 @@ d-i base-installer/kernel/image string linux-image-amd64
 ### 碰。這整套改動還沒在真實硬體上驗證過，跟這份文件其他地方的 .vmx/
 ### vmkfstools 一樣誠實標註，第一次跑完請回報結果。
 tasksel tasksel/first multiselect standard
-d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible pipx jq curl squid-openssl vim uidmap network-manager
+### acl（setfacl/getfacl）：實機撞過——ansible_runner_host 上每一個
+### delegate_to 的 task 都是「非 root 的 ansible-runner become 到非 root 的
+### harbor/caddy-proxy」，Ansible 的 become 機制在這種情境下要靠某種方式
+### 讓暫存模組檔案對 become_user 可讀，偏好的作法是用 setfacl 只授權給
+### 那個特定使用者；沒有 acl 套件時它會退到下一個偏好順位，但那個 fallback
+### 用的是 Solaris/illumos 的 ACL 語法（chmod A+user:...:allow），Linux 的
+### chmod 根本看不懂，直接噴 "invalid mode" 整個 task 失敗，不會優雅降級
+### 成「暫存檔案開所有人可讀」那個更差但至少能動的退路。裝 acl 讓它走得到
+### 最優先、也最安全的 setfacl 路徑，不然唯一的替代方案是設
+### ANSIBLE_ALLOW_WORLD_READABLE_TMPFILES=true，但那會讓 harbor 的暫存
+### 檔案對 caddy-proxy（以及任何其他本機帳號）可讀，違背這兩個 rootless
+### 使用者刻意互相隔離的設計。
+d-i pkgsel/include string openssh-server sudo open-vm-tools wireguard-tools ufw chrony podman podman-compose buildah ansible pipx jq curl squid-openssl vim uidmap network-manager acl
 d-i pkgsel/upgrade select none
 popularity-contest popularity-contest/participate boolean false
 
@@ -280,6 +292,7 @@ d-i preseed/late_command string \
   in-target systemctl disable systemd-timesyncd; \
   in-target systemctl enable chrony; \
   cp -r /cdrom/srv/. /target/srv/; \
+  mkdir -p /target/srv/harbor-installer-cache; \
   chmod -R 700 /target/srv; \
   in-target chown {{ vm_user }}:{{ vm_user }} /srv/init/software-install.sh; \
   in-target chgrp {{ vm_user }} /srv/init; \
@@ -322,6 +335,8 @@ d-i preseed/late_command string \
   echo 'ExecStart=/srv/init/software-install.sh ${RUNTIME_DIRECTORY}' >> /target/etc/systemd/system/software-install.service; \
   echo 'ExecStart=+/usr/bin/mv ${RUNTIME_DIRECTORY}/task /usr/local/bin/task' >> /target/etc/systemd/system/software-install.service; \
   echo 'ExecStart=+/usr/bin/mv ${RUNTIME_DIRECTORY}/gum /usr/local/bin/gum' >> /target/etc/systemd/system/software-install.service; \
+  echo 'ExecStart=+/usr/bin/mv ${RUNTIME_DIRECTORY}/yq /usr/local/bin/yq' >> /target/etc/systemd/system/software-install.service; \
+  echo 'ExecStart=+/usr/bin/chmod +x /usr/local/bin/yq' >> /target/etc/systemd/system/software-install.service; \
   echo 'ExecStart=+/usr/bin/pipx install --global ansible-navigator' >> /target/etc/systemd/system/software-install.service; \
   echo 'ExecStart=+/bin/rm -rf ${RUNTIME_DIRECTORY}' >> /target/etc/systemd/system/software-install.service; \
   echo 'RemainAfterExit=yes' >> /target/etc/systemd/system/software-install.service; \

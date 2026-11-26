@@ -63,4 +63,18 @@ if ! command -v gum >/dev/null 2>&1; then
   mv "$STAGE_DIR/gum_2.0.2_Linux_x86_64/gum" "$STAGE_DIR/gum"
 fi
 
-echo "software-install.sh（rootless 階段）完成：task/gum 已驗證、解壓到 $STAGE_DIR，等 unit 裡後續的 root 階段 mv 進 /usr/local/bin"
+# yq（mikefarah 的 Go 版，v4.54.3，跟 srv/ansible/Containerfile 裡釘的
+# 版本一致）——實機撞過：harbor-install.yml 裡「移除 prepare 產出
+# docker-compose.yml 的 log service」這個 task 這一輪改成
+# delegate_to: ansible_runner_host，變成是在這台真正的 host 上執行
+# （不是 EE 容器裡），但 yq 從頭到尾只裝在 Containerfile 裡——host 本身
+# 的 $PATH 找不到這個指令，直接噴 "[Errno 2] No such file or directory:
+# b'yq'"。單一 binary，不是 tar.gz，不用解壓這一步。
+if ! command -v yq >/dev/null 2>&1; then
+  echo "==> 裝 yq（v4.54.3）..."
+  curl -fsSL --retry 10 --retry-delay 3 --retry-all-errors -o "$STAGE_DIR/yq" \
+    https://github.com/mikefarah/yq/releases/download/v4.54.3/yq_linux_amd64
+  echo "129534601871538efe0ba4c5e62a34fb1d5f469bcb975c4fddeb467d82974973  $STAGE_DIR/yq" | sha256sum -c -
+fi
+
+echo "software-install.sh（rootless 階段）完成：task/gum/yq 已驗證、解壓到 $STAGE_DIR，等 unit 裡後續的 root 階段 mv 進 /usr/local/bin"

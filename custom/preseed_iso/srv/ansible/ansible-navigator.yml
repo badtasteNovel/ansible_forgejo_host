@@ -65,7 +65,35 @@ ansible-navigator:
       policy: missing
     container-options:
       - "--pid=host"
-      - "--network=host"
+      # 原本是 --network=host（容器共用主機整個網路堆疊），改成接
+      # ansible-builder-network（podman-network.sh 建的那個 podman
+      # network，10.90.0.0/24，gateway 10.90.0.1）——跟 --user=0/
+      # --privileged 拿掉是同一個方向：不要讓這個容器預設就擁有比它
+      # 實際需要更大的存取範圍。這個網路原本是給 EE image build 用的
+      # （名字因此得名），現在 image build 本身改用另一個完全獨立、
+      # 封閉、不跟任何 WireGuard 網段打交道的 ee-build-network（見
+      # config.sh 的 ensure_ee_image()），這個改成給這裡（真正執行
+      # playbook 的 EE 容器）用，兩者刻意分開，不共用同一個身分，見
+      # podman-network.sh 自己的完整說明。
+      #
+      # 換掉之後，容器裡還留著的幾個沒有 delegate_to 的 task，原本靠
+      # --network=host 才能連到的東西，各自用不同方式接回去：
+      # - harbor-install.yml 查 GitHub release/下載 offline installer
+      #   tgz：改走下面 environment-variables 設的 http_proxy/
+      #   https_proxy，經過 squid（10.90.0.1:3128，firewall.sh.j2 已經
+      #   開放 ansible-builder-network 連到這個 port）。
+      # - caddy-proxy-install.yml 的 wait_for 健康檢查（連
+      #   {{ wireguard_cluster_vm_address }}:{{ caddy_proxy_internal_port }}）：
+      #   firewall.sh.j2 另外開了一條 ansible-builder-network 連到
+      #   caddy-proxy 實際監聽 port 的規則，直接路由過去就行，不需要
+      #   額外設定。
+      # - harbor-install.yml 那 12 個打 Harbor API（127.0.0.1:
+      #   {{ harbor_internal_http_port }}）的 uri task：這個目標是
+      #   loopback，不是哪個網路都救不回來（127.0.0.1 不能跨網路
+      #   namespace 路由）——全部改成 delegate_to: ansible_runner_host，
+      #   在真正的 host 上執行，host 自己的 127.0.0.1 本來就摸得到。
+      - "--network"
+      - "ansible-builder-network"
       - "--user=0"
       # /run 故意不走下面 volume-mounts 那個結構化欄位，改用這裡的原生
       # podman -v 參數直接傳 rslave propagation——ansible-navigator 自己對
@@ -146,6 +174,25 @@ ansible-navigator:
       - src: /etc/ssl/certs
         dest: /etc/ssl/certs
         options: rw
+      # 實機撞過：rootless_podman_user_setup.yml 的「開 linger」task
+      # （loginctl enable-linger harbor）直接噴 "Failed to look up user
+      # harbor: No such process"——這個 task 沒有 delegate_to，在容器裡
+      # 跑，`loginctl` 要把參數 "harbor" 這個字串解析成 UID 完全是
+      # 容器自己這個行程本地做的事（呼叫 NSS 的 getpwnam()），跟
+      # --pid=host 讓它連得到 host 真正的 systemd-logind 是兩件獨立的
+      # 事——host 的 harbor 帳號是裝機時 late_command 才建的，容器自己
+      # image 裡的 /etc/passwd 從來沒有這個帳號，本地解析當然查無此人。
+      # 同一個問題也會讓後面 ansible.builtin.getent 查 harbor/caddy-proxy
+      # 的 uid 失敗。只掛 /etc/passwd、/etc/group 這兩個檔案（不是整個
+      # /etc），唯讀——這兩支 playbook 完全沒有任何地方需要在容器裡新增
+      # /修改使用者帳號（那些操作已經搬到 late_command），純粹只是要讓
+      # NSS 查得到 host 上已經存在的帳號名稱。
+      - src: /etc/passwd
+        dest: /etc/passwd
+        options: ro
+      - src: /etc/group
+        dest: /etc/group
+        options: ro
       - src: /home/harbor
         dest: /home/harbor
         options: rw
@@ -201,6 +248,25 @@ ansible-navigator:
       - src: /usr/local/share/ca-certificates
         dest: /usr/local/share/ca-certificates
         options: rw
+    # 容器換成 ansible-builder-network 之後（不再是 --network=host），
+    # 容器裡還留著、沒有 delegate_to、自己要連外網的那兩個 task
+    # （harbor-install.yml 查 GitHub release digest、下載 offline
+    # installer tgz）要經過 squid 才能出去，跟這個專案「所有對外連線都
+    # 要過 squid 稽核」的一致要求一樣——squid 監聽在這個 network 自己的
+    # gateway 10.90.0.1:3128，firewall.sh.j2 已經開一條
+    # ansible-builder-network → 10.90.0.1:3128 的 ufw 規則。這裡設的是
+    # ansible-playbook 這個行程自己的環境變數，不是透過 podman build 的
+    # --build-arg（那個是給 Containerfile 的 RUN 步驟用，跟這裡是兩個
+    # 完全不同的情境），Ansible 的 get_url/uri 模組（urllib 底層）會自動
+    # 讀這兩個變數決定要不要走代理。no_proxy 排除 127.0.0.1/localhost——
+    # 雖然現在容器裡已經沒有任何 task 會打這兩個位址（Harbor API 那些都
+    # delegate_to 到真正的 host 去了），但這是對 http_proxy/https_proxy
+    # 的標準防禦性搭配，成本幾乎是零。
+    environment-variables:
+      set:
+        http_proxy: "http://10.90.0.1:3128"
+        https_proxy: "http://10.90.0.1:3128"
+        no_proxy: "127.0.0.1,localhost"
   playbook-artifact:
     enable: false # 不需要留執行紀錄檔案，journalctl/bootstrap-services 自己的輸出就夠用
   logging:

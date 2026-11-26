@@ -278,12 +278,22 @@
       ansible.builtin.uri:
         url: "{{ harbor_api_base }}/health"
         status_code: 200
+      delegate_to: ansible_runner_host
       register: harbor_health_check
       until: harbor_health_check.json.status is defined and harbor_health_check.json.status == "healthy"
       retries: 60
       delay: 5
 
     # ────────────────────────── proxy-cache：上游 endpoint + project + robot 帳號 + GC 排程 ──────────────────────────
+    # 這一整段的 uri task 全部帶 delegate_to: ansible_runner_host——目標
+    # 是 {{ harbor_api_base }}（http://127.0.0.1:{{ harbor_internal_http_port }}），
+    # 這是 loopback，不是哪個 podman network 都救得回來的東西（容器換成
+    # ansible-builder-network 之後，127.0.0.1 在容器自己的 network
+    # namespace 裡只會指向容器自己，不管開多少防火牆/路由規則都不能讓它
+    # 跨 namespace 連到 host 的 127.0.0.1），只能在真正的 host 上執行，
+    # 見 ansible-navigator.yml container-options 的說明。這些 task 本身
+    # 不是 podman/systemd 操作，不需要 become/環境變數，單純 HTTP 查詢，
+    # 用 ansible-runner 這個連線身份本身執行即可。
 
     - name: '列出目前已有的 registry endpoint'
       ansible.builtin.uri:
@@ -291,6 +301,7 @@
         url_username: admin
         url_password: "{{ harbor_admin_password }}"
         force_basic_auth: true
+      delegate_to: ansible_runner_host
       register: harbor_existing_registries
 
     - name: '列出目前已有的 project'
@@ -299,6 +310,7 @@
         url_username: admin
         url_password: "{{ harbor_admin_password }}"
         force_basic_auth: true
+      delegate_to: ansible_runner_host
       register: harbor_existing_projects
 
     - name: '補上 PROXY_MAP 裡還沒建的 registry endpoint'
@@ -315,6 +327,7 @@
           url: "{{ item.url }}"
           insecure: false
         status_code: [201]
+      delegate_to: ansible_runner_host
       loop: "{{ proxy_map }}"
       loop_control:
         label: "{{ item.name }}"
@@ -326,6 +339,7 @@
         url_username: admin
         url_password: "{{ harbor_admin_password }}"
         force_basic_auth: true
+      delegate_to: ansible_runner_host
       register: harbor_registries_after_create
 
     - name: '補上 PROXY_MAP 裡還沒建的 proxy-cache project（quota = harbor_project_quota_bytes）'
@@ -344,6 +358,7 @@
             public: "false"
             auto_scan: "true"
         status_code: [201]
+      delegate_to: ansible_runner_host
       loop: "{{ proxy_map }}"
       loop_control:
         label: "{{ item.project }}"
@@ -360,6 +375,7 @@
         body:
           storage_per_project: "{{ harbor_project_quota_bytes }}"
         status_code: [200]
+      delegate_to: ansible_runner_host
 
     - name: '查有沒有既有的 system-level robot 帳號（system robot 不能用 API 改權限，一律刪了重建，帶最新的 PROXY_MAP project 清單）'
       ansible.builtin.uri:
@@ -367,6 +383,7 @@
         url_username: admin
         url_password: "{{ harbor_admin_password }}"
         force_basic_auth: true
+      delegate_to: ansible_runner_host
       register: harbor_existing_robots
 
     - name: '刪掉既有的 robot 帳號（如果有）'
@@ -377,6 +394,7 @@
         url_password: "{{ harbor_admin_password }}"
         force_basic_auth: true
         status_code: [200, 204]
+      delegate_to: ansible_runner_host
       when: harbor_existing_robots.json | selectattr('name', 'equalto', 'robot$' + robot_name) | list | length > 0
 
     - name: '組 robot 帳號的權限清單——每個 proxy project 一組固定的 access（pull + 非破壞性的 list/read，不給 delete）'
@@ -412,6 +430,7 @@
           description: "podman/buildah pull-through cache puller"
           permissions: "{{ robot_permissions }}"
         status_code: [201]
+      delegate_to: ansible_runner_host
       register: harbor_robot_create
 
     - name: "確保 {{ harbor_secrets_dir }} 存在（ansible.builtin.copy 不會自動建缺少的上層目錄，下面那個 task 沒有這行會直接失敗）"
@@ -449,6 +468,7 @@
             type: Custom
             cron: "0 0 4 * * 0"
         status_code: [200, 404]
+      delegate_to: ansible_runner_host
       register: harbor_gc_put
 
     - name: 'GC 排程第一次建立（PUT 回 404 代表還沒有排程可以更新，改用 POST 新建）'
@@ -466,6 +486,7 @@
             type: Custom
             cron: "0 0 4 * * 0"
         status_code: [201]
+      delegate_to: ansible_runner_host
       when: harbor_gc_put.status == 404
 
     # ────────────────────────── 收尾 ──────────────────────────

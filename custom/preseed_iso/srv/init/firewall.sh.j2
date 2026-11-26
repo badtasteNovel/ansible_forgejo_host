@@ -79,6 +79,24 @@ ufw allow from {{ wireguard_basic_peer_subnet }} to any port {{ caddy_proxy_inte
 {% endif %}
 ufw allow from {{ lan_subnet }} to any port {{ caddy_proxy_internal_port }} proto tcp
 
+# ansible-builder-network（10.90.0.0/24，ansible-navigator 執行 playbook
+# 時的 EE 容器用，見 ansible-navigator.yml container-options，取代原本的
+# --network=host）開放連到 caddy-proxy 實際監聽的那個 port——目前唯一的
+# 用途是 caddy-proxy-install.yml 自己的 wait_for 健康檢查（容器不在
+# --network=host 之後，只能靠這條路由摸到 caddy-proxy，見
+# podman-network.sh 的說明），但故意不是只為這一個健康檢查開的窄範圍：
+# 之後任何 playbook 想透過 caddy-proxy 的反代查詢某個後端服務的狀態，
+# 走的都是同一個 port（Caddy 自己用 host/path 決定轉去哪個後端），這條
+# 規則先開好就一次涵蓋，不用每加一個新服務就回來改一次防火牆。只開到
+# caddy-proxy 的 port，不是整個 10.105.0.0/24、10.104.0.0/24 網段——
+# 10.90.0.0/24 只有這台 VM 自己的 EE 容器會連上去，沒有任何外部（其他
+# cluster 節點、網際網路）摸得到它，但仍然維持「只開到實際要用的那個
+# port」的原則，不因為來源網路本身風險低就整個網段開放。
+ufw allow from 10.90.0.0/24 to {{ wireguard_cluster_vm_address }} port {{ caddy_proxy_internal_port }} proto tcp
+{% if is_basic_host %}
+ufw allow from 10.90.0.0/24 to {{ wireguard_basic_vm_address }} port {{ caddy_proxy_internal_port }} proto tcp
+{% endif %}
+
 # caddy-proxy 是 rootless 使用者，容器對外發布的埠（podman -p，實際在主機
 # 這邊 bind 的是 podman 自己的 rootlessport 這支 unprivileged helper）沒辦法
 # 直接綁 443 這種 <1024 的特權埠——這裡本來考慮放寬 net.ipv4.ip_unprivileged_
@@ -165,24 +183,29 @@ EOF
   mv "$before_rules_tmp" /etc/ufw/before.rules
 fi
 
-# EE image build（手寫 Containerfile → podman build，見 config.sh 的 ensure_ee_image）
-# 用的 podman network（podman-network.sh 建好的那個，固定子網
-# 10.90.0.0/24、固定 gateway 10.90.0.1——這兩個值改了要連 podman-network.sh/
-# squid.sh 一起改）不再直接連外網：build container 只透過 squid（bootstrap/
-# services/squid.sh 裝的正向代理，full bump，監聽在這個 network 自己的
-# gateway 10.90.0.1:3128）出去，squid 自己依照 /etc/squid/allowed_domains.txt
-# 的白名單決定放不放行哪個網域。
+# 兩個各自獨立的 podman network（podman-network.sh 建好的那兩個，固定子網
+# /固定 gateway——這幾個值改了要連 podman-network.sh/squid.sh 一起改）
+# 都不直接連外網：都只透過 squid（bootstrap/services/squid.sh 裝的正向
+# 代理，full bump，監聽在各自 network 自己的 gateway:3128）出去，squid
+# 自己依照 /etc/squid/allowed_domains.txt 的白名單決定放不放行哪個網域。
+# ee-build-network（10.89.0.0/24）只給 EE image build（config.sh 的
+# ensure_ee_image()）用；ansible-builder-network（10.90.0.0/24）原本也是
+# 給 image build 用（名字因此得名），現在改給 ansible-navigator 真正執行
+# playbook 時的 EE 容器用（見 ansible-navigator.yml），這個網路裡還留著
+# 幾個沒有 delegate_to、會自己連外網的 task（harbor-install.yml 查
+# GitHub release/下載 offline installer tgz），一樣要經過 squid。
 #
-# 這代表 build container 要通過的只是「連到宿主機自己」這件事（目的地就是
-# 10.90.0.1 這個本機位址），不是「轉送到外部網路」——走的是 ufw 一般的
-# INPUT chain，不是 FORWARD chain，所以不需要像第一版那樣用 `ufw route
-# allow` 開 DNS/443 的轉送例外，連帶的 DEFAULT_FORWARD_POLICY=DROP 問題
-# （最早撞到的那個問題，當時討論過不能整條 FORWARD chain 開 ACCEPT，範圍
-# 太大）也因此不再相關——host 自己收下這個封包就結束了，不會把它轉送到
-# 任何地方。squid.sh 執行的時間點晚於這四個 systemd unit（squid 跟著
-# 互動式的 bootstrap-services 表單跑，四個 unit 開機就自動跑完了），所以
-# 這條規則套用的當下，squid 還沒啟動也沒關係——ufw 規則本身跟 squid 服務
-# 有沒有在監聽是兩件獨立的事，規則先放著不影響。
+# 這代表兩邊的 build/run container 要通過的只是「連到宿主機自己」這件事
+# （目的地就是各自的 gateway 位址），不是「轉送到外部網路」——走的是 ufw
+# 一般的 INPUT chain，不是 FORWARD chain，所以不需要像第一版那樣用 `ufw
+# route allow` 開 DNS/443 的轉送例外，連帶的 DEFAULT_FORWARD_POLICY=DROP
+# 問題（最早撞到的那個問題，當時討論過不能整條 FORWARD chain 開
+# ACCEPT，範圍太大）也因此不再相關——host 自己收下這個封包就結束了，不會
+# 把它轉送到任何地方。squid.sh 執行的時間點晚於這四個 systemd unit（squid
+# 跟著互動式的 bootstrap-services 表單跑，四個 unit 開機就自動跑完了），
+# 所以這兩條規則套用的當下，squid 還沒啟動也沒關係——ufw 規則本身跟 squid
+# 服務有沒有在監聽是兩件獨立的事，規則先放著不影響。
+ufw allow from 10.89.0.0/24 to 10.89.0.1 port 3128 proto tcp
 ufw allow from 10.90.0.0/24 to 10.90.0.1 port 3128 proto tcp
 
 ufw --force enable

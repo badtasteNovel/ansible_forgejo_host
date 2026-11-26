@@ -62,9 +62,10 @@ ensure_ee_image() {
   # https_proxy=http://127.0.0.1:3128 經過 squid.sh 裝好、也讓宿主機信任
   # 其 CA 的那個 squid（squid 監聽所有介面，天生就包含 127.0.0.1，不需要
   # 額外設定；squid.conf 的 acl localnet 已經多認了這個來源）。用
-  # 127.0.0.1，不是 10.90.0.1：這裡是宿主機自己發起的連線，直接走
-  # loopback 就好，10.90.0.1 是給 build container 連回宿主機用的 bridge
-  # gateway，宿主機不需要、也不應該繞那條路連自己。docker.io 相關網域
+  # 127.0.0.1，不是 10.89.0.1：這裡是宿主機自己發起的連線，直接走
+  # loopback 就好，10.89.0.1 是給 build container（ee-build-network）
+  # 連回宿主機用的 bridge gateway，宿主機不需要、也不應該繞那條路連
+  # 自己。docker.io 相關網域
   # 要先在 squid.sh 的白名單裡（見該腳本的說明）否則這裡會被 squid 自己
   # 的白名單擋下來。拉好之後，下面 podman build 的 FROM 那一步看到本機
   # 已經有這個 image，就不會再發起任何網路存取。
@@ -72,9 +73,14 @@ ensure_ee_image() {
     https_proxy="http://127.0.0.1:3128" podman pull debian:13-slim
   fi
 
-  # --network 指到 /srv/init/podman-network.sh 建好的那個專用 network；
-  # --build-arg 把 proxy 位址傳給 RUN 步驟（Containerfile 裡的 apt-get/
-  # pip 都要經過 squid）。http_proxy/https_proxy 故意用 --build-arg 傳，
+  # --network 指到 /srv/init/podman-network.sh 建好的 ee-build-network
+  # （不是 ansible-builder-network——這兩個現在是分開的兩個網路，後者
+  # 改給 ansible-navigator 真正執行 playbook 時的 EE 容器用，見
+  # ansible-navigator.yml 的 container-options，不再給 image build 用，
+  # 見 podman-network.sh 自己的說明）；--build-arg 把 proxy 位址傳給
+  # RUN 步驟（Containerfile 裡的 apt-get/pip 都要經過 squid，位址對應
+  # ee-build-network 自己的 gateway 10.89.0.1，不是 10.90.0.1）。
+  # http_proxy/https_proxy 故意用 --build-arg 傳，
   # 不是 export 成這支函式呼叫 podman build 的外層環境變數——外層環境
   # 變數會被 podman/skopeo 自己（不只是 RUN 步驟，連 FROM 的 registry
   # 存取都會讀到，Go 的 net/http 標準行為，不是 podman build 的
@@ -93,9 +99,9 @@ ensure_ee_image() {
   # 檔案只是也一起被當成 context 送進 podman build（純本機操作，沒有
   # 遠端 daemon，不會被送到任何地方），不是風險。
   podman build \
-    --network ansible-builder-network \
-    --build-arg http_proxy=http://10.90.0.1:3128 \
-    --build-arg https_proxy=http://10.90.0.1:3128 \
+    --network ee-build-network \
+    --build-arg http_proxy=http://10.89.0.1:3128 \
+    --build-arg https_proxy=http://10.89.0.1:3128 \
     -f "$EE_DIR/Containerfile" -t "$EE_IMAGE" /etc/squid/ssl_cert
 }
 

@@ -203,7 +203,16 @@ cat >/etc/squid/squid.conf <<'EOF'
 # 經過這裡拉 base image（debian:13-slim），不讓宿主機自己的
 # podman pull 繞過 squid 直接打外網，所以下面 acl localnet 要多認
 # 127.0.0.1 這個來源，不然會被 `http_access deny !localnet` 擋掉。
+#
+# 10.89.0.0/24（ee-build-network）跟 10.90.0.0/24（ansible-builder-network）
+# 是兩個各自獨立的 podman network（見 podman-network.sh 的說明）——前者
+# 只給 build EE image 用，後者原本也是給 build EE image 用（名字因此
+# 得名），現在改給 ansible-navigator 真正執行 playbook 時的 EE 容器用
+# （取代原本的 --network=host，見 ansible-navigator.yml），兩者都需要
+# 經過這裡連外網（分別是 apt-get/pip，跟 harbor-install.yml 查 GitHub
+# release/下載 offline installer tgz），所以都要認。
 
+acl localnet src 10.89.0.0/24
 acl localnet src 10.90.0.0/24
 acl localnet src 127.0.0.1/32
 acl allowed_domains dstdomain "/etc/squid/allowed_domains.txt"
@@ -238,4 +247,4 @@ echo "==> 啟用 squid..."
 systemctl enable squid
 systemctl restart squid
 
-echo "squid 已就緒，監聽 3128（full bump，只服務 10.90.0.0/24，白名單見 /etc/squid/allowed_domains.txt）"
+echo "squid 已就緒，監聽 3128（full bump，只服務 10.89.0.0/24、10.90.0.0/24，白名單見 /etc/squid/allowed_domains.txt）"
