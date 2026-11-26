@@ -10,7 +10,8 @@
 ## 功能(control-panel)
 
 - 🖥️ **control-panel軟體架構**：vm 的設計主要是為了control-panel而設計。
-- 🌐 **cluster內部所有節點透過wireguard進行連線**：以此專案建立的vm，被賦予10.105.0.1 的ip 位置，作為 cluster 的 control-panel，用10.105.0.0/24 進行節點溝通。
+- 🌐 **cluster內部所有節點透過wireguard進行連線**：以此專案建立的vm，被賦予10.105.0.1/32 的ip 位置，作為 cluster 的 control-panel，用10.105.0.0/24 進行節點溝通。
+- 🌐 **harbor透過wireguard進行連線**：task build 可以選擇，是否讓此vm 被賦予10.104.0.1/32，當作是harbor-server，若選擇否，後可以跑 task wireguard:join 加入10.104.0.0/24 網段。
 
 ---
 

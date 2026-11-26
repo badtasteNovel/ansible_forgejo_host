@@ -110,6 +110,19 @@ ufw allow from {{ lan_subnet }} to any port {{ caddy_proxy_internal_port }} prot
 # 直接打在沒人監聽的 443 上。OUTPUT 這裡改用 -d 比對目的位址，不能像
 # PREROUTING 那樣用 -i 比對進來的介面——OUTPUT 這個時間點封包還沒決定
 # 要從哪個介面送出去，沒有「進來的介面」這個概念可以比對。
+#
+# OUTPUT 這條故意用 DNAT --to-destination，不是 REDIRECT --to-port——
+# 實機撞過：iptables 的 REDIRECT target 在 PREROUTING 跟 OUTPUT 這兩個
+# hook 的行為並不一樣。PREROUTING 的 REDIRECT 會把目的位址改寫成「封包
+# 進來那個介面本身的位址」（這正是上面那條要的效果）；OUTPUT 的
+# REDIRECT 處理的是本機自己發起的封包，官方文件寫得很明確：會把目的
+# 位址改寫成 127.0.0.1，不是比對到的那個位址。caddy-proxy 的 rootlessport
+# 只綁了 {{ wireguard_cluster_vm_address }}/{{ wireguard_basic_vm_address }}
+# 這兩個明確位址，完全沒綁 127.0.0.1:{{ caddy_proxy_internal_port }}——
+# 用 iptables -t nat -L OUTPUT -n -v 確認規則真的有比對到封包（counter
+# 不是 0），但連線仍然 connection refused，才找到是改寫到 127.0.0.1 之後
+# 沒人監聽這個問題。改用 DNAT --to-destination 明確指定「位址不變、只換
+# 埠號」，才會落在 rootlessport 真正在聽的那個位址上。
 # 用 /etc/ufw/before.rules 加 *nat 區塊，不是直接呼叫 iptables：這支腳本
 # 跑完之後呼叫的是 ufw（不是裸的 iptables），ufw 自己的規則來源只認它管理
 # 的這幾個檔案（before.rules/after.rules/user.rules），裸 iptables 下的
@@ -139,10 +152,10 @@ if ! grep -q '^\*nat$' /etc/ufw/before.rules; then
 :PREROUTING ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 -A PREROUTING -i wg-cluster -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
--A OUTPUT -d {{ wireguard_cluster_vm_address }} -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
+-A OUTPUT -d {{ wireguard_cluster_vm_address }} -p tcp --dport 443 -j DNAT --to-destination {{ wireguard_cluster_vm_address }}:{{ caddy_proxy_internal_port }}
 {% if is_basic_host %}
 -A PREROUTING -i wg-basic -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
--A OUTPUT -d {{ wireguard_basic_vm_address }} -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
+-A OUTPUT -d {{ wireguard_basic_vm_address }} -p tcp --dport 443 -j DNAT --to-destination {{ wireguard_basic_vm_address }}:{{ caddy_proxy_internal_port }}
 {% endif %}
 COMMIT
 EOF
