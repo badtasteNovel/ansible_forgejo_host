@@ -23,16 +23,22 @@ set -euo pipefail
 # apply.sh 之前，自己直接呼叫的一個獨立步驟，混進 services/ 裡會讓人誤會
 # 它是 apply.sh 那條鏈的一環。
 #
-# 目標位址直接查 wg-cluster 這個介面目前真正配到的位址，不是靠任何表單值
-# 或設定檔去猜——這支腳本本身就是透過 SSH 連進 wg-cluster 執行的
-# （preseed.cfg.j2 把 sshd 的 ListenAddress 鎖定在這個介面的位址上），跑到
-# 這裡的這一刻 wg-cluster 保證已經是 up 的狀態，直接問介面本身永遠是最新、
-# 最可靠的來源，也跟 caddy-proxy 實際綁定的介面位址天然一致（caddy-proxy
-# 自己也是綁在這個位址上，見 caddy-proxy-install.yml）。bootstrap-services
-# 的表單原本有一個 WireguardVMAddress 欄位讓使用者自己填，後來發現唯一
-# 用途只是 apply.sh 最後印給人看的那行網址，沒有任何程式邏輯依賴它，改成
-# 這裡同一套「直接查介面」的做法之後，那個欄位整題拿掉了（見 apply.sh
-# 自己的說明）。
+# 目標位址直接查介面目前真正配到的位址，不是靠任何表單值或設定檔去猜。
+# 優先用 wg-basic（如果這台 VM 有的話）：這支腳本目前唯一的呼叫情境是
+# harbor_hostname，Harbor 概念上是 basic 網段（多個 cluster 共用的基礎
+# 設施，見 debian.yml 兩套 WireGuard 身分的說明）的東西，不是這個 cluster
+# 自己的——VM 本機對 Harbor 的連線走 wg-basic，才跟其他 cluster 將來連
+# 這個 Harbor 走的是同一條路徑（同一個 caddy-proxy 綁定位址、同一條
+# firewall.sh.j2 的 REDIRECT 規則），順便在裝機當下就驗證那條路徑是通的，
+# 不用等到真的有其他 cluster 接上來才第一次測到。wg-basic 不是每台 VM
+# 都有（只有 is_basic_host 的那台才會產生這個介面），所以用
+# `ip link show` 先確認介面存不存在，不存在就照舊退回 wg-cluster——這支
+# 腳本本身就是透過 SSH 連進 wg-cluster 執行的（preseed.cfg.j2 把 sshd 的
+# ListenAddress 鎖定在這個介面的位址上），跑到這裡的這一刻 wg-cluster
+# 保證已經是 up 的狀態，一定能當退回的選項。bootstrap-services 的表單
+# 原本有一個 WireguardVMAddress 欄位讓使用者自己填，後來發現唯一用途只是
+# apply.sh 最後印給人看的那行網址，沒有任何程式邏輯依賴它，改成這裡同一套
+# 「直接查介面」的做法之後，那個欄位整題拿掉了（見 apply.sh 自己的說明）。
 #
 # 用法：dns-apply.sh <hostname>
 
@@ -42,9 +48,14 @@ if [ "$#" -ne 1 ] || [ -z "$1" ]; then
 fi
 hostname="$1"
 
-wg_cluster_address=$(ip -4 -o addr show dev wg-cluster | grep -oP 'inet \K[0-9.]+')
-if [ -z "$wg_cluster_address" ]; then
-  echo "錯誤：查不到 wg-cluster 介面目前的位址" >&2
+if ip link show wg-basic >/dev/null 2>&1; then
+  target_interface=wg-basic
+else
+  target_interface=wg-cluster
+fi
+target_address=$(ip -4 -o addr show dev "$target_interface" | grep -oP 'inet \K[0-9.]+')
+if [ -z "$target_address" ]; then
+  echo "錯誤：查不到 ${target_interface} 介面目前的位址" >&2
   exit 1
 fi
 
@@ -53,6 +64,6 @@ fi
 # 本身一樣是一次性的。/^#/! 排除註解行，避免註解裡剛好出現這個 hostname
 # 字眼被誤判成舊的對應紀錄而整行被刪掉。
 sed -i "/^#/!{/[[:space:]]${hostname}\([[:space:]]\|\$\)/d}" /etc/hosts
-printf '%s\t%s\n' "$wg_cluster_address" "$hostname" >>/etc/hosts
+printf '%s\t%s\n' "$target_address" "$hostname" >>/etc/hosts
 
-echo "已把 ${hostname} 對應到 ${wg_cluster_address}（寫進 /etc/hosts）" >&2
+echo "已把 ${hostname} 對應到 ${target_address}（${target_interface}，寫進 /etc/hosts）" >&2

@@ -1,12 +1,15 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 version: '3'
 
-# task wireguard:add/wireguard:remove——跟專案 repo 自己根目錄的
-# Taskfile.yaml 同一個慣例（namespace 檔案），只是這份是裝在 VM 上、
-# 給 charlie 互動操作 /srv/network/{cluster,basic}/ 底下那套
-# add-peer.sh/remove-peer.sh 用的（見那兩支腳本自己的說明）。這兩個
-# task 本身都只是「問清楚要對哪個網段、哪個 peer 做事」，真正的邏輯
-# （產生金鑰、改 .conf、wg syncconf）都在對應的 .sh 裡，這裡不重複寫。
+# task wireguard:add/wireguard:remove/wireguard:join——跟專案 repo 自己
+# 根目錄的 Taskfile.yaml 同一個慣例（namespace 檔案），只是這份是裝在
+# VM 上、給 charlie 互動操作 /srv/network/{cluster,basic}/ 底下那套
+# add-peer.sh/remove-peer.sh/join.sh 用的（見那幾支腳本自己的說明）。
+# add/remove 本身都只是「問清楚要對哪個網段、哪個 peer 做事」，真正的
+# 邏輯（產生金鑰、改 .conf、wg syncconf）都在對應的 .sh 裡，這裡不重複
+# 寫。join 沒有「選網段」這一步——目前只有 basic 有「加入」這個概念
+# （cluster 的 peer 是從控制端用 playbook/wsl/add-peer.yml 加的，不是
+# VM 自己跑腳本加入自己），直接呼叫 join.sh 就好。
 #
 # 這份檔案跟它要用到的 task/gum 兩個工具，都沒有實機跑過。
 
@@ -40,3 +43,10 @@ tasks:
         fi
         segment="${interface#wg-}"
         sudo "/srv/network/${segment}/remove-peer.sh"
+
+  join:
+    desc: "把這台 VM 加入 wg-basic（10.104.0.0/24）——貼上 basic host 的 add-peer.sh 印出來的設定"
+    silent: true
+    deps: [":require-sudo"]
+    cmds:
+      - sudo /srv/network/basic/join.sh

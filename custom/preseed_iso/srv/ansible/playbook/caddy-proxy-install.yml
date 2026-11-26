@@ -141,10 +141,8 @@
           ExecStart=/usr/bin/podman run -d --name caddy-proxy \
             --network slirp4netns:allow_host_loopback=true \
             -p {{ wireguard_cluster_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
-{% if is_basic_host %}
-            -p {{ wireguard_basic_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
-{% endif %}
-            -v {{ caddy_proxy_home }}/Caddyfile:/etc/caddy/Caddyfile:z,ro \
+            {% if is_basic_host %}-p {{ wireguard_basic_vm_address }}:{{ caddy_proxy_internal_port }}:{{ caddy_proxy_internal_port }} \
+            {% endif %}-v {{ caddy_proxy_home }}/Caddyfile:/etc/caddy/Caddyfile:z,ro \
             -v {{ caddy_proxy_sites_dir }}:/etc/caddy/sites.d:z,ro \
             -v {{ caddy_proxy_data_dir }}:/data:z,rw \
             {{ caddy_proxy_image }}

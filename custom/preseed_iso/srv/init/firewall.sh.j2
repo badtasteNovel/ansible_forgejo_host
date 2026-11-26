@@ -100,6 +100,16 @@ ufw allow from {{ lan_subnet }} to any port {{ caddy_proxy_internal_port }} prot
 # {{ caddy_proxy_internal_port }}），不能只寫埠號監聽所有介面，否則改寫後
 # 的目的位址對不上任何監聽中的 socket。
 #
+# 光有 PREROUTING 這兩條還不夠——實機撞過：VM 自己對自己連 443（例如
+# bootstrap-services 的 podman login harbor.internal:443，harbor_hostname
+# 在 /etc/hosts 裡指到 VM 自己的 {{ wireguard_cluster_vm_address }}，見
+# dns-apply.sh 的說明）會直接 connection refused。這是典型的 hairpin NAT
+# 問題：PREROUTING 這個 hook 只看得到從真實網路介面「進來」的封包，VM
+# 對自己發起的連線，從 kernel 的角度完全不會經過 PREROUTING，是走
+# OUTPUT 這個 hook，所以 PREROUTING 的 REDIRECT 規則從來沒套用過，封包
+# 直接打在沒人監聽的 443 上。OUTPUT 這裡改用 -d 比對目的位址，不能像
+# PREROUTING 那樣用 -i 比對進來的介面——OUTPUT 這個時間點封包還沒決定
+# 要從哪個介面送出去，沒有「進來的介面」這個概念可以比對。
 # 用 /etc/ufw/before.rules 加 *nat 區塊，不是直接呼叫 iptables：這支腳本
 # 跑完之後呼叫的是 ufw（不是裸的 iptables），ufw 自己的規則來源只認它管理
 # 的這幾個檔案（before.rules/after.rules/user.rules），裸 iptables 下的
@@ -127,9 +137,12 @@ if ! grep -q '^\*nat$' /etc/ufw/before.rules; then
   nat_block=$(cat <<'EOF'
 *nat
 :PREROUTING ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
 -A PREROUTING -i wg-cluster -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
+-A OUTPUT -d {{ wireguard_cluster_vm_address }} -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
 {% if is_basic_host %}
 -A PREROUTING -i wg-basic -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
+-A OUTPUT -d {{ wireguard_basic_vm_address }} -p tcp --dport 443 -j REDIRECT --to-port {{ caddy_proxy_internal_port }}
 {% endif %}
 COMMIT
 EOF
