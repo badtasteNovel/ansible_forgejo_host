@@ -91,21 +91,30 @@ Get-NetFirewallRule -Name *ssh* | Get-NetFirewallAddressFilter
 
 ## 🚀 使用方式 (Usage)
 
-**建立一台 Debian VM**（互動問 VM 名稱、要留幾個 WireGuard peer 名額）：
+**建立一台 VM**（互動問 VM 名稱、要留幾個 WireGuard peer 名額）：
+**client端如果是wsl至少要有兩個peer**
 
 ```bash
-task build:debian
+task build
 ```
-
-跑完會把 preseed ISO、`.vmx`、兩顆 `vmkfstools` 建好的虛擬磁碟（系統碟 + 資料碟）都上傳到 `custom/.env` 指定的 datastore，並印出剩下的手動步驟：
+跑完會根據 ``playbook/control-panel/debian.yml`` 檔案建立一份用於建立control-panel的 golden image , golden image 檔案的配置將於 custom/preseed_iso/template/preseed.cfg.j2 進行
 
 ```text
-1. 登入 ESXi Host Client，瀏覽到該 .vmx，Register VM
+1. 登入該主機，瀏覽到該 .vmx，Register VM
 2. 手動 Power On
-3. preseed 無人值守安裝跑完後，查一下 VM 的 LAN IP（唯一用途：等 task add-peer 要用）
-4. task add-peer —— 把目前這台機器加進 WireGuard、接通隧道
-5. 之後 SSH 固定走 WireGuard 位址 10.105.0.1，不是 LAN IP
+3. preseed 無人值守安裝跑完後，查一下 VM 的 LAN IP（唯一用途：等 task add-peer 要用)
+4. task add-peer 將會詢問 vm 的 lan ip (請確認 add-peer 執行的內網網域與vm 在同一個網段)
+5. 使用 add-peer 即可建立 wireguard 與ssh 連結
 ```
+```text
+windows 加入ssh 方法如下
+```
+
+```text
+先加入 wireguard:
+```
+[windows端 wireguard 下載](https://www.wireguard.com/install/)
+![image](./docs/picture/windows-wireguard-add-screenshot.png)
 
 **把目前這台機器接進某台 VM 的 WireGuard 隧道**（VM 要先開機、知道它的 LAN IP）：
 
