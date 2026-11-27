@@ -155,6 +155,16 @@ ensure_ee_image() {
 # 限制。trap 設定之後、函式正常結束前用 `trap - EXIT` 把它清掉，不讓
 # 它一路留到呼叫端後續的程式碼還在生效（雖然留著也無害——podman
 # secret rm 對一個已經不存在的 secret 是安全的 no-op，頂多清兩次）。
+# 實機撞過：ansible_runner_host（delegate_to 用的那個連線，見 inventory/
+# ansible_runner.ini）連 10.90.0.1:52222 時 "Connection refused"——
+# ansible-builder-network 這個 podman network 的 bridge/gateway，是等
+# 第一個 container 真正掛上去才會由 netavark 建出來，sshd 用傳統
+# ListenAddress 的方式在系統開機那一刻去 bind 這個位址時，位址根本還不
+# 存在，之後也不會回頭重試。這個問題最後不是在這支函式裡解的——改成讓
+# sshd 走 systemd 的 socket activation（ssh.socket，openssh-server 套件
+# 本身就隨附這個 unit）配 FreeBind，讓 bind 在位址還不存在時也能成功，
+# 見 preseed.cfg.j2 裡 ssh.socket.d/override.conf 那段的完整說明。這支
+# 函式本身不需要為這個問題做任何事。
 run_navigator() {
   podman secret rm ansible_runner_ssh_key >/dev/null 2>&1 || true
   podman secret create ansible_runner_ssh_key /srv/podman/keys/ansible_runner_ed25519 >/dev/null

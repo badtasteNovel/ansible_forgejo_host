@@ -88,10 +88,27 @@ mkdir -p "$SSL_CERT_DIR"
 # CA 信任進去了，兩邊的 CA 會對不起來。
 if [ ! -f "$SSL_CERT_DIR/squidCA.pem" ]; then
   echo "==> 產生 squid 的 CA（只給這台 VM 自己的 EE build container 信任，不是公開 CA，只用在 full bump 重簽）..."
+  # -addext 這兩條：實機撞過 harbor-install.yml 查 GitHub release 的
+  # ansible.builtin.uri task 噴 "[SSL: CERTIFICATE_VERIFY_FAILED]
+  # certificate verify failed: CA cert does not include key usage
+  # extension"——這台機器裝的 openssl 版本，`openssl req -x509` 不帶
+  # -addext 時只會自動補上 Basic Constraints（CA:TRUE），不會自動補
+  # Key Usage，產生出來的 CA 證書完全沒有這個 extension（直接用
+  # openssl x509 -text 確認過）。大部分用 openssl/curl 驗證的消費者
+  # （podman/skopeo 拉 debian:13-slim 那個 pull、squid 自己簽發葉證書）
+  # 對缺這個 extension 比較寬容，但 Python 的 ssl 模組（ansible.builtin.
+  # uri/get_url 底層用的就是這個）驗證 CA 簽署資格時要求明確看到
+  # keyCertSign 這個 bit，缺了就直接判定整條證書鏈不可信，不是這個
+  # GitHub API 呼叫本身有問題。之前這個呼叫沒撞過這個 bug，純粹因為它
+  # 從來沒經過 squid（EE 容器原本用 --network=host 直接打外網，繞過
+  # squid 的稽核），這輪改成走 http_proxy/https_proxy 經過 squid 之後，
+  # 才第一次真的用嚴格驗證的用戶端去檢查這張自簽 CA。
   openssl req -new -newkey rsa:4096 -sha256 -days 3650 -nodes -x509 \
     -keyout "$SSL_CERT_DIR/squidCA.key" \
     -out "$SSL_CERT_DIR/squidCA.crt" \
-    -subj "/CN=debian-vm squid full-bump CA (EE build only)"
+    -subj "/CN=debian-vm squid full-bump CA (EE build only)" \
+    -addext "basicConstraints=critical,CA:TRUE" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign"
   cat "$SSL_CERT_DIR/squidCA.key" "$SSL_CERT_DIR/squidCA.crt" >"$SSL_CERT_DIR/squidCA.pem"
 fi
 # proxy 不是這支腳本自己建的使用者——它是 Debian 的 base-passwd 套件在

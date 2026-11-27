@@ -72,6 +72,13 @@ ufw allow from {{ wireguard_cluster_peer_subnet }} to any port {{ vm_ssh_port }}
 {% if is_dev %}
 ufw allow from {{ lan_subnet }} to any port {{ vm_ssh_port }} proto tcp
 {% endif %}
+# ansible-runner 用來 SSH 回這台 VM 自己的那條連線（見
+# inventory/ansible_runner.ini／preseed.cfg.j2 的 ListenAddress 10.90.0.1
+# 說明）——EE 容器現在接的是 ansible-builder-network，不是
+# --network=host，連 sshd 要走這個 network 自己的 gateway，跟其他走
+# 這個 network 的東西（squid、caddy-proxy）一樣，只開到實際要用的那個
+# port，不是整個網段對 SSH 都開放。
+ufw allow from 10.90.0.0/24 to 10.90.0.1 port {{ vm_ssh_port }} proto tcp
 ufw allow from {{ wireguard_cluster_peer_subnet }} to any port 123 proto udp
 ufw allow from {{ wireguard_cluster_peer_subnet }} to any port {{ caddy_proxy_internal_port }} proto tcp
 {% if is_basic_host %}

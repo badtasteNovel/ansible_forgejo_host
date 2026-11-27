@@ -59,7 +59,17 @@ harbor_install() {
     # 環境變數傳進來，這支不重新問、不重新算。
     harbor_registry="${HARBOR_HOSTNAME}:${CADDY_PROXY_HTTPS_PORT}"
 
-    harbor_username="robot\$$(cat "$HARBOR_SECRETS_DIR/robot-name")"
+    # 不要再手動補 robot$ 前綴——實機撞過 "invalid username/password"：
+    # harbor-install.yml 寫進 robot-name 檔案的那個值，來自 Harbor API
+    # 建立 robot 之後回傳的 .json.name，Harbor 自己（src/controller/
+    # robot/controller.go：robot.Name = fmt.Sprintf("%s%s",
+    # config.RobotPrefix(ctx), r.Name)，RobotNamePrefix 預設值就是
+    # "robot$"）早就把這個前綴加上去了，檔案裡存的已經是完整的
+    # "robot$mirror-puller"，不是裸名字 "mirror-puller"。這裡再手動加
+    # 一次 robot\$，兩個前綴疊在一起變成 "robot$robot$mirror-puller"，
+    # 帳號名稱整個是錯的，podman login 自然回報帳密錯誤（不是密碼真的
+    # 錯，是使用者名稱就對不上任何存在的帳號）。
+    harbor_username=$(cat "$HARBOR_SECRETS_DIR/robot-name")
     harbor_password=$(cat "$HARBOR_SECRETS_DIR/robot-secret")
   else
     if [ -z "$HARBOR_URL" ] || [ -z "$HARBOR_USERNAME" ] || [ -z "$HARBOR_PASSWORD" ]; then

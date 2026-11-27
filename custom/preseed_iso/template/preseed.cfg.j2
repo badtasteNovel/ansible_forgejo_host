@@ -167,13 +167,47 @@ d-i finish-install/reboot_in_progress note
 ### 在每次真正呼叫 ansible-navigator 前後動態 create/rm 的事（見 config.sh
 ### 自己的說明），build 時只需要把私鑰材料放到那個固定路徑、公鑰寫進
 ### ansible-runner 自己的 authorized_keys 就夠了。authorized_keys 用
-### from="127.0.0.1" 限制——這把金鑰的用途就是「VM 對自己的 loopback
-### 連線」，從任何其他來源打過來都不該被接受，跟 charlie 自己的
+### from="127.0.0.1,10.90.0.0/24" 限制——這把金鑰的用途就是「VM 對自己
+### 的連線」，從任何其他來源打過來都不該被接受，跟 charlie 自己的
 ### authorized_keys 用 wireguard_cluster_peer_subnet 限制是同一個道理。
-### sshd 額外加一條 ListenAddress 127.0.0.1，跟原本鎖定 WireGuard 位址的
-### 那條並存——127.0.0.1 天生就只有本機才連得到，不會因此開放任何新的
-### 遠端攻擊面，跟「SSH 只能走 WireGuard」這條既有規則要擋的「遠端」
-### 存取完全是兩件不衝突的事。
+### 127.0.0.1 跟 10.90.0.0/24 都要列：ansible-navigator 執行 playbook 時
+### 的 EE 容器現在接的是 ansible-builder-network（見 ansible-navigator.yml
+### container-options，取代原本的 --network=host），容器自己的
+### 127.0.0.1 不等於 host 的 127.0.0.1，inventory/ansible_runner.ini 的
+### ansible_host 因此指到這個網路的 gateway 10.90.0.1，sshd 連線實際看到
+### 的來源位址是容器在這個子網裡拿到的位址（不保證每次都是同一個，podman
+### 的 IPAM 分配不是這個專案自己控制的值，所以用整個 /24 比對，不是單一
+### IP）——127.0.0.1 留著是給 host 自己（或任何直接在 host 上跑、不透過
+### 容器的情境）debug 用，不是 ansible-navigator 現在實際走的路徑。
+### sshd 監聽位址這次改成不走 sshd_config 的 ListenAddress，改用 systemd
+### 的 socket activation（ssh.socket，openssh-server 套件本身就隨附這個
+### unit，Accept=no，觸發的是同一個 ssh.service——sshd 不用自己呼叫
+### bind()，是 systemd 先 bind 好、透過 LISTEN_FDS 交給它）——實機撞過：
+### ListenAddress 10.90.0.1 這條，sshd 只在 ssh.service 開機啟動那一刻
+### bind 一次，但 ansible-builder-network 的 gateway 要等第一個 container
+### 真正掛上去才會由 netavark 建出來（見 podman-network.sh 的說明），開機
+### 當下這個位址根本不存在，bind 直接失敗（journalctl 可見 "Cannot assign
+### requested address"），之後這個位址真的出現，sshd 也不會回頭重新嘗試
+### （SIGHUP 可以讓它重新 bind，但沒有一個自然的時間點會送這個訊號）。
+### systemd 的 socket unit 支援 FreeBind（底層是 IP_FREEBIND 這個 socket
+### option）——讓 bind 在位址還不存在時也能成功，等位址之後真的出現，
+### 連線自然就能進來，不需要提早確保、也不需要事後重新 bind。這個改動
+### 不會放寬安全性：FreeBind 只影響「bind 這個動作本身會不會失敗」，不會
+### 讓一個原本不存在的位址變得可達——WireGuard 沒起來，
+### {{ wireguard_cluster_vm_address }} 這個位址在網路層照樣不存在，FreeBind
+### 不會讓封包因此多一條路徑送達，真正擋住「WireGuard 沒起來就連不進來」
+### 這件事的，從頭到尾都是位址本身存不存在，不是 bind 成不成功——原本掛
+### 在 ssh.service 上、刻意讓它等 wg-cluster.service 才啟動的那條
+### Requires=，因此也不再需要（這個保證現在是靠網路層本身撐著，不是靠
+### 啟動順序）。
+### ListenStream= 這一行先寫空值再接著列三個——systemd 的清單型設定在
+### drop-in 裡要先清空才能蓋掉套件原本預設的 ListenStream=22（只清不接
+### 新值等於完全不開任何埠，必須緊接著重新列一次要的清單）。127.0.0.1、
+### 10.90.0.1 這兩條跟原本用 ListenAddress 時的理由一樣：127.0.0.1 天生
+### 只有本機才連得到，10.90.0.1 是 ansible-builder-network 自己的
+### gateway（只有這台 VM 自己的 EE 容器會連上去，沒有任何外部摸得到），
+### 兩者都不會因此開放任何新的遠端攻擊面，跟「SSH 只能走 WireGuard」這條
+### 既有規則要擋的「遠端」存取完全是兩件不衝突的事。
 ### wg-cluster.conf／wg-basic.conf 的「真正」檔案留在
 ### /etc/wireguard/<segment>/（wg-quick/systemd unit 認的就是這個路徑，
 ### 不能搬走），但在 /srv/network/<segment>/wg-*.conf 這裡額外建一個
@@ -263,7 +297,7 @@ d-i preseed/late_command string \
   echo 'ansible-runner ALL=(%podman-svc) NOPASSWD: ALL' > /target/etc/sudoers.d/ansible-runner; \
   chmod 440 /target/etc/sudoers.d/ansible-runner; \
   mkdir -p /target/home/ansible-runner/.ssh; \
-  echo 'from="127.0.0.1",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ansible_runner_public_key }}' > /target/home/ansible-runner/.ssh/authorized_keys; \
+  echo 'from="127.0.0.1,10.90.0.0/24",no-port-forwarding,no-X11-forwarding,no-agent-forwarding {{ ansible_runner_public_key }}' > /target/home/ansible-runner/.ssh/authorized_keys; \
   chmod 700 /target/home/ansible-runner/.ssh; \
   chmod 600 /target/home/ansible-runner/.ssh/authorized_keys; \
   in-target chown -R ansible-runner:ansible-runner /home/ansible-runner/.ssh; \
@@ -274,13 +308,15 @@ d-i preseed/late_command string \
   chmod 600 /target/srv/podman/keys/ansible_runner_ed25519; \
   chown -R root:root /target/srv/podman; \
 {% if not is_dev %}
-  sed -i '/^ListenAddress /d' /target/etc/ssh/sshd_config; \
-  echo 'ListenAddress {{ wireguard_cluster_vm_address }}' >> /target/etc/ssh/sshd_config; \
-  echo 'ListenAddress 127.0.0.1' >> /target/etc/ssh/sshd_config; \
-  mkdir -p /target/etc/systemd/system/ssh.service.d; \
-  echo '[Unit]' > /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
-  echo 'After=wg-cluster.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
-  echo 'Requires=wg-cluster.service' >> /target/etc/systemd/system/ssh.service.d/wireguard.conf; \
+  mkdir -p /target/etc/systemd/system/ssh.socket.d; \
+  echo '[Socket]' > /target/etc/systemd/system/ssh.socket.d/override.conf; \
+  echo 'ListenStream=' >> /target/etc/systemd/system/ssh.socket.d/override.conf; \
+  echo 'ListenStream={{ wireguard_cluster_vm_address }}:{{ ssh_port }}' >> /target/etc/systemd/system/ssh.socket.d/override.conf; \
+  echo 'ListenStream=127.0.0.1:{{ ssh_port }}' >> /target/etc/systemd/system/ssh.socket.d/override.conf; \
+  echo 'ListenStream=10.90.0.1:{{ ssh_port }}' >> /target/etc/systemd/system/ssh.socket.d/override.conf; \
+  echo 'FreeBind=true' >> /target/etc/systemd/system/ssh.socket.d/override.conf; \
+  in-target systemctl disable ssh.service; \
+  in-target systemctl enable ssh.socket; \
 {% endif %}
   echo 'fs.inotify.max_user_watches = 1048576' > /target/etc/sysctl.d/99-inotify.conf; \
   echo 'fs.inotify.max_user_instances = 8192' >> /target/etc/sysctl.d/99-inotify.conf; \
