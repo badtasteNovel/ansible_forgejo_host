@@ -89,13 +89,16 @@ Get-NetFirewallRule -Name *ssh* | Get-NetFirewallAddressFilter
 
 ---
 
-## 🚀 使用方式 (Usage)
+## 🚀 建置使用方式 (build Usage)
 
 **建立一台 VM**（互動問 VM 名稱、要留幾個 WireGuard peer 名額）：
 **client端如果是wsl至少要有兩個peer**
 
 ```bash
 task build
+```
+```text
+選項:vm 要成為basic 網段的 host 嗎(取決於這台是否要是 harbor 伺服器，如果你已有harbor 伺服器則請選擇否)
 ```
 跑完會根據 ``playbook/control-panel/debian.yml`` 檔案建立一份用於建立control-panel的 golden image , golden image 檔案的配置將於 custom/preseed_iso/template/preseed.cfg.j2 進行
 
@@ -115,23 +118,15 @@ windows 加入ssh 方法如下
 ```
 [windows端 wireguard 下載](https://www.wireguard.com/install/)
 ![image](./docs/picture/windows-wireguard-add-screenshot.png)
-
-**把目前這台機器接進某台 VM 的 WireGuard 隧道**（VM 要先開機、知道它的 LAN IP）：
-
-```bash
-task add-peer
+```text
+後加入ssh
 ```
 
-互動選要接哪一台 VM、輸入它的 IP；如果偵測到是 WSL2，會額外幫原生 Windows 也認領一個獨立的 peer，產生一份 WireGuard for Windows 可以直接 import 的 `.conf`。
+如果要重新打包 請先跑過 ```task clean``` 可以清除上一個打包的產物。
+## 🚀 拆包使用方式 (unpackage Usage)
 
-**其他常用指令**：
-
-```bash
-task select-iso    # 互動選一個已登記的 OS，印出 ISO 路徑
-task verify-iso    # 驗證 ISO 是官方未竄改版本
-task clean         # 清掉 build 產物（keys 會額外二次確認）
-```
-
+已經上傳以後，進入到 home directory，到達 ~/bootstrap，先用 sudo bootstrap-sudo 給予使用者密碼。
+再跑 sudo ./bootstrap-services 將預設的功能進行建置。
 ---
 
 ## 📂 資料夾結構 (Directory Structure)
