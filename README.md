@@ -124,9 +124,10 @@ windows 加入ssh 方法如下
 
 如果要重新打包 請先跑過 ```task clean``` 可以清除上一個打包的產物。
 ## 🚀 拆包使用方式 (unpackage Usage)
-
+```text
 已經上傳以後，進入到 home directory，到達 ~/bootstrap，先用 sudo bootstrap-sudo 給予使用者密碼。
 再跑 sudo ./bootstrap-services 將預設的功能進行建置。
+```
 ---
 
 ## 📂 資料夾結構 (Directory Structure)
